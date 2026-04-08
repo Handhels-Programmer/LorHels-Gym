@@ -10,9 +10,11 @@
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes zoomIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+        @keyframes pulse-fast { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .8; transform: scale(0.95); } }
         .animate-fade-in { animation: fadeIn 0.5s ease-out forwards; }
         .animate-slide-up { animation: slideUp 0.5s ease-out forwards; }
         .animate-zoom-in { animation: zoomIn 0.5s ease-out forwards; }
+        .animate-pulse-fast { animation: pulse-fast 1s infinite; }
         input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     </style>
 </head>
@@ -65,19 +67,18 @@
             subscription: { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 }, 
             profile: { weight: 0, height: 0 },
             routines: [], 
-            workoutHistory: [],
+            workoutHistory: [], // Aquí se guardará el registro de rendimiento
             showRoutineForm: false, 
             routineDraft: { name: '', exercises: [] },
             plans: [], 
+            
+            // --- NUEVO: Estado del Entrenamiento Activo ---
+            activeWorkout: null, 
+            timerInterval: null,
+
             adminData: { 
-                pendingUsers: [],
-                activeUsers: [],
-                stats: { athletes: 0, trainers: 0, activePlans: 0, exercises: 0 },
-                exercises: [], 
-                pendingExercises: [], 
-                showExerciseForm: false,
-                plans: [], 
-                showPlanForm: false 
+                pendingUsers: [], activeUsers: [], stats: { athletes: 0, trainers: 0, activePlans: 0, exercises: 0 },
+                exercises: [], pendingExercises: [], showExerciseForm: false, plans: [], showPlanForm: false 
             },
             trainersList: [],
             trainerData: { clients: [], pendingClients: [], view: 'list', selectedClient: null } 
@@ -124,6 +125,8 @@
                             AppState.user.id = user.uid;
                             AppState.user.email = user.email;
                             await FirebaseDB.saveAllData();
+                        } else {
+                            await this.checkSubscriptionStatus();
                         }
                         this.changeView('dashboard');
                     } else {
@@ -134,6 +137,18 @@
                 });
             },
 
+            async checkSubscriptionStatus() {
+                if (AppState.subscription.status === 'active' && AppState.subscription.expiresAt) {
+                    const expDate = new Date(AppState.subscription.expiresAt);
+                    const now = new Date();
+                    if (now > expDate) {
+                        AppState.subscription.status = 'inactive';
+                        await FirebaseDB.saveAllData();
+                        if(AppState.user.role !== 'admin') alert("⚠️ Tu plan ha expirado. Por favor, reactiva tu suscripción para continuar.");
+                    }
+                }
+            },
+
             resetState() {
                 AppState.user = { id: '', name: '', role: 'user', email: '', trainerId: null };
                 AppState.subscription = { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 };
@@ -141,6 +156,8 @@
                 AppState.routines = []; AppState.workoutHistory = [];
                 AppState.routineDraft = { name: '', exercises: [] };
                 AppState.plans = [];
+                AppState.activeWorkout = null;
+                clearInterval(AppState.timerInterval);
                 AppState.trainerData = { clients: [], pendingClients: [], view: 'list', selectedClient: null };
             },
 
@@ -150,27 +167,24 @@
                 event.preventDefault();
                 const email = document.getElementById('auth-email').value;
                 const password = document.getElementById('auth-pass').value;
-                
                 try {
-                    if (AppState.authMode === 'login') {
-                        await signInWithEmailAndPassword(auth, email, password);
-                    } else {
+                    if (AppState.authMode === 'login') await signInWithEmailAndPassword(auth, email, password);
+                    else {
                         AppState.user.name = document.getElementById('auth-name').value;
                         AppState.user.role = document.getElementById('auth-role').value;
                         await createUserWithEmailAndPassword(auth, email, password);
                     }
-                } catch (error) {
-                    alert("Error en la autenticación: " + error.message);
-                }
+                } catch (error) { alert("Error en la autenticación: " + error.message); }
             },
             async logout() { await signOut(auth); },
 
             changeView(view) {
-                AppState.currentView = view;
-                if (view === 'adminPanel') {
-                    this.loadUsersAdmin();
-                    this.loadExercises(); 
+                if (AppState.activeWorkout && view !== 'routines') {
+                    if(!confirm("Tienes un entrenamiento en curso. ¿Deseas salir y perder el progreso no guardado?")) return;
+                    this.cancelWorkout();
                 }
+                AppState.currentView = view;
+                if (view === 'adminPanel') { this.loadUsersAdmin(); this.loadExercises(); }
                 if (view === 'dashboard' && AppState.user.role === 'admin') this.loadAdminStats();
                 if (view === 'dashboard' && AppState.user.role === 'user' && !AppState.user.trainerId) this.loadTrainers();
                 if (view === 'exercises' || view === 'routines') this.loadExercises();
@@ -185,17 +199,175 @@
                 this.render();
             },
 
-            async saveProfile() {
-                const weight = document.getElementById('profile-weight').value;
-                const height = document.getElementById('profile-height').value;
+            // --- MOTOR DE ENTRENAMIENTO (ACTIVO) ---
+            startWorkout(routineIndex) {
+                const routine = AppState.routines[routineIndex];
+                if (!routine || !routine.exercises || routine.exercises.length === 0) return alert("Esta rutina no tiene ejercicios.");
 
-                AppState.profile.weight = parseFloat(weight);
-                AppState.profile.height = parseInt(height);
+                AppState.activeWorkout = {
+                    routineId: routine.id,
+                    routineName: routine.name,
+                    exercises: JSON.parse(JSON.stringify(routine.exercises)), // Copia profunda
+                    currentExIndex: 0,
+                    currentSet: 1,
+                    isResting: false,
+                    restTimeRemaining: 0,
+                    startTime: new Date().toISOString(),
+                    logs: [] // Guardará: { exName, sets: [{ reps, weight, volume }] }
+                };
+
+                // Inicializar log para el primer ejercicio
+                AppState.activeWorkout.logs.push({
+                    exerciseName: AppState.activeWorkout.exercises[0].name,
+                    exerciseId: AppState.activeWorkout.exercises[0].id,
+                    setsCompleted: []
+                });
+
+                this.render();
+            },
+
+            finishSet() {
+                const aw = AppState.activeWorkout;
+                const currentEx = aw.exercises[aw.currentExIndex];
+                
+                // Obtener valores de los inputs
+                const repsInput = document.getElementById('workout-reps').value;
+                const weightInput = document.getElementById('workout-weight').value;
+                
+                const reps = parseInt(repsInput) || currentEx.reps;
+                const weight = parseFloat(weightInput) || currentEx.weight || 0;
+                const volume = reps * weight; // Lógica de Peso Levantado solicitada
+
+                // Guardar en el log
+                aw.logs[aw.currentExIndex].setsCompleted.push({
+                    setNumber: aw.currentSet,
+                    reps: reps,
+                    weight: weight,
+                    volume: volume
+                });
+
+                // Lógica de avance
+                if (aw.currentSet < currentEx.sets) {
+                    aw.currentSet++;
+                    this.startRest(10); // 60 segundos de descanso por defecto
+                } else {
+                    if (aw.currentExIndex < aw.exercises.length - 1) {
+                        aw.currentExIndex++;
+                        aw.currentSet = 1;
+                        aw.logs.push({
+                            exerciseName: aw.exercises[aw.currentExIndex].name,
+                            exerciseId: aw.exercises[aw.currentExIndex].id,
+                            setsCompleted: []
+                        });
+                        this.startRest(90); // Más descanso entre diferentes ejercicios
+                    } else {
+                        // Fin de la rutina completa
+                        this.finishWorkout();
+                    }
+                }
+            },
+
+            startRest(seconds) {
+                AppState.activeWorkout.isResting = true;
+                AppState.activeWorkout.restTimeRemaining = seconds;
+                this.render();
+
+                AppState.timerInterval = setInterval(() => {
+                    AppState.activeWorkout.restTimeRemaining--;
+                    
+                    if (AppState.activeWorkout.restTimeRemaining <= 0) {
+                        this.skipRest();
+                        this.playAudioBeep();
+                    } else {
+                        // Actualizar solo el texto para no re-renderizar todo el DOM cada segundo
+                        const timerDisplay = document.getElementById('rest-timer-display');
+                        if (timerDisplay) timerDisplay.innerText = this.formatTime(AppState.activeWorkout.restTimeRemaining);
+                    }
+                }, 1000);
+            },
+
+            skipRest() {
+                clearInterval(AppState.timerInterval);
+                AppState.activeWorkout.isResting = false;
+                this.render();
+            },
+
+            playAudioBeep() {
+                try {
+                    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                    const osc = ctx.createOscillator();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(880, ctx.currentTime); // Tono alto
+                    osc.connect(ctx.destination);
+                    osc.start();
+                    osc.stop(ctx.currentTime + 0.5); // Medio segundo
+                } catch(e) { console.log("Audio no soportado en este navegador."); }
+            },
+
+            async finishWorkout() {
+                const aw = AppState.activeWorkout;
+                clearInterval(AppState.timerInterval);
+                
+                // Calcular totales
+                let totalVolume = 0;
+                let totalSets = 0;
+                let totalReps = 0;
+
+                aw.logs.forEach(log => {
+                    log.setsCompleted.forEach(set => {
+                        totalVolume += set.volume;
+                        totalSets += 1;
+                        totalReps += set.reps;
+                    });
+                });
+
+                const workoutRecord = {
+                    id: Date.now().toString(),
+                    routineId: aw.routineId,
+                    routineName: aw.routineName,
+                    date: new Date().toISOString(),
+                    durationMinutes: Math.round((new Date() - new Date(aw.startTime)) / 60000),
+                    totalVolume: totalVolume,
+                    totalSets: totalSets,
+                    totalReps: totalReps,
+                    logs: aw.logs
+                };
+
+                // Guardar en el historial global
+                if (!AppState.workoutHistory) AppState.workoutHistory = [];
+                AppState.workoutHistory.push(workoutRecord);
 
                 try {
                     await FirebaseDB.saveAllData();
-                    alert("¡Perfil actualizado correctamente! 💪");
-                } catch (error) { alert("Error al guardar los datos."); }
+                    alert(`¡Entrenamiento completado! 🔥\n\nResumen:\nSeries: ${totalSets}\nVolumen Total: ${totalVolume} lbs levantadas.`);
+                } catch(e) {
+                    alert("Error guardando el historial.");
+                }
+
+                AppState.activeWorkout = null;
+                this.render();
+            },
+
+            cancelWorkout() {
+                clearInterval(AppState.timerInterval);
+                AppState.activeWorkout = null;
+                this.render();
+            },
+
+            formatTime(seconds) {
+                const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+                const s = (seconds % 60).toString().padStart(2, '0');
+                return `${m}:${s}`;
+            },
+            // --- FIN MOTOR ENTRENAMIENTO ---
+
+            async saveProfile() {
+                const weight = document.getElementById('profile-weight').value;
+                const height = document.getElementById('profile-height').value;
+                AppState.profile.weight = parseFloat(weight);
+                AppState.profile.height = parseInt(height);
+                try { await FirebaseDB.saveAllData(); alert("¡Perfil actualizado correctamente! 💪"); } 
+                catch (error) { alert("Error al guardar los datos."); }
             },
 
             requestSubscription(planId, planName) {
@@ -226,10 +398,7 @@
                 } catch(e) { console.error("Error cargando planes:", e); }
             },
 
-            togglePlanForm() {
-                AppState.adminData.showPlanForm = !AppState.adminData.showPlanForm;
-                this.render();
-            },
+            togglePlanForm() { AppState.adminData.showPlanForm = !AppState.adminData.showPlanForm; this.render(); },
 
             async savePlan(event) {
                 event.preventDefault();
@@ -242,7 +411,6 @@
                     targetRole: document.getElementById('plan-role').value,
                     createdAt: new Date().toISOString()
                 };
-
                 try {
                     await addDoc(collection(db, "plans"), data);
                     alert("¡Plan creado exitosamente! 🚀");
@@ -253,10 +421,8 @@
 
             async deletePlan(planId) {
                 if(confirm("¿Estás seguro de eliminar este plan?")) {
-                    try {
-                        await deleteDoc(doc(db, "plans", planId));
-                        this.loadPlansAdmin();
-                    } catch(e) { console.error(e); }
+                    try { await deleteDoc(doc(db, "plans", planId)); this.loadPlansAdmin(); } 
+                    catch(e) { console.error(e); }
                 }
             },
 
@@ -270,14 +436,12 @@
                         if (data.user?.role === 'trainer') trainers++;
                         if (data.subscription?.status === 'active') activePlans++;
                     });
-                    
                     const exSnap = await getDocs(collection(db, "exercises"));
                     let exerciseCount = 0;
                     exSnap.forEach(doc => {
                         const ex = doc.data();
                         if (ex.status === 'approved' || !ex.status) exerciseCount++;
                     });
-                    
                     AppState.adminData.stats = { athletes, trainers, activePlans, exercises: exerciseCount }; 
                     this.render();
                 } catch(e) { console.error("Error cargando stats:", e); }
@@ -297,7 +461,6 @@
                 try {
                     let expiresAt = null;
                     let maxClients = 0;
-                    
                     if (planId) {
                         const planSnap = await getDoc(doc(db, "plans", planId));
                         if (planSnap.exists()) {
@@ -309,25 +472,19 @@
                             maxClients = planData.maxClients || 0; 
                         }
                     }
-
                     await updateDoc(doc(db, "users", userId), { 
-                        "subscription.status": "active",
-                        "subscription.expiresAt": expiresAt,
-                        "subscription.maxClients": maxClients 
+                        "subscription.status": "active", "subscription.expiresAt": expiresAt, "subscription.maxClients": maxClients 
                     });
-                    
                     alert("✅ Usuario aprobado. Fecha de vencimiento y límites configurados.");
                     this.loadUsersAdmin(); 
                 } catch(e) { console.error(e); alert("Error al aprobar."); }
             },
 
-            // --- LÓGICA DE ALUMNOS (ENTRENADOR) ---
             async loadTrainerClients() {
                 try {
                     const q = query(collection(db, "users"), where("user.trainerId", "==", AppState.user.id));
                     const snap = await getDocs(q);
                     const allClients = snap.docs.map(d => ({id: d.id, ...d.data()}));
-                    
                     AppState.trainerData.clients = allClients.filter(c => c.subscription?.status === 'active');
                     AppState.trainerData.pendingClients = allClients.filter(c => c.subscription?.status !== 'active');
                     this.render();
@@ -336,147 +493,84 @@
 
             viewClientDetail(clientId) {
                 const client = AppState.trainerData.clients.find(c => c.id === clientId);
-                if (client) {
-                    AppState.trainerData.selectedClient = client;
-                    AppState.trainerData.view = 'detail';
-                    this.render();
-                }
+                if (client) { AppState.trainerData.selectedClient = client; AppState.trainerData.view = 'detail'; this.render(); }
             },
-
-            backToClientList() {
-                AppState.trainerData.selectedClient = null;
-                AppState.trainerData.view = 'list';
-                this.render();
-            },
-
-            // --- NUEVO: FUNCIONES DE ASIGNACIÓN DE RUTINAS POR ENTRENADOR ---
-            openRoutineBuilder() {
-                AppState.trainerData.view = 'create_routine';
-                AppState.routineDraft = { name: '', exercises: [] };
-                // Asegurarnos de tener los ejercicios disponibles
-                this.loadExercises();
-            },
-
-            cancelClientRoutine() {
-                AppState.trainerData.view = 'detail';
-                this.render();
-            },
+            backToClientList() { AppState.trainerData.selectedClient = null; AppState.trainerData.view = 'list'; this.render(); },
+            openRoutineBuilder() { AppState.trainerData.view = 'create_routine'; AppState.routineDraft = { name: '', exercises: [] }; this.loadExercises(); },
+            cancelClientRoutine() { AppState.trainerData.view = 'detail'; this.render(); },
 
             async saveClientRoutine(event) {
                 event.preventDefault();
                 const name = document.getElementById('routine-name').value;
                 const client = AppState.trainerData.selectedClient;
-                
-                if (!name || AppState.routineDraft.exercises.length === 0) {
-                    return alert("Ingresa un nombre y al menos un ejercicio.");
-                }
-
+                if (!name || AppState.routineDraft.exercises.length === 0) return alert("Ingresa un nombre y al menos un ejercicio.");
                 const exercisesWithDetails = AppState.routineDraft.exercises.map((ex, i) => {
-                    return {
-                        ...ex,
-                        sets: parseInt(document.getElementById(`sets-${i}`).value),
-                        reps: parseInt(document.getElementById(`reps-${i}`).value)
-                    }
+                    return { ...ex, sets: parseInt(document.getElementById(`sets-${i}`).value), reps: parseInt(document.getElementById(`reps-${i}`).value) }
                 });
-
-                const newRoutine = {
-                    id: Date.now().toString(),
-                    name: name,
-                    exercises: exercisesWithDetails,
-                    createdAt: new Date().toISOString()
-                };
-
-                // Añadimos a la lista local del cliente y guardamos en Firestore
+                const newRoutine = { id: Date.now().toString(), name: name, exercises: exercisesWithDetails, createdAt: new Date().toISOString() };
                 if (!client.routines) client.routines = [];
                 client.routines.push(newRoutine);
-                
                 try {
                     await updateDoc(doc(db, "users", client.id), { routines: client.routines });
                     alert(`¡Rutina asignada a ${client.user.name} con éxito! 🔥`);
                     AppState.trainerData.view = 'detail';
                     this.render();
-                } catch(e) {
-                    console.error(e);
-                    alert("Error asignando la rutina al alumno.");
-                }
+                } catch(e) { console.error(e); alert("Error asignando la rutina al alumno."); }
             },
 
             async deleteClientRoutine(routineIndex) {
                 if(confirm("¿Estás seguro de eliminar esta rutina del perfil del alumno?")) {
                     const client = AppState.trainerData.selectedClient;
                     client.routines.splice(routineIndex, 1);
-                    try {
-                        await updateDoc(doc(db, "users", client.id), { routines: client.routines });
-                        this.render();
-                    } catch(e) { console.error(e); alert("Error al eliminar la rutina."); }
+                    try { await updateDoc(doc(db, "users", client.id), { routines: client.routines }); this.render(); } 
+                    catch(e) { console.error(e); alert("Error al eliminar la rutina."); }
                 }
             },
-            // --- FIN NUEVO ---
 
             async loadExercises() {
                 try {
                     const snap = await getDocs(collection(db, "exercises"));
                     const allExercises = snap.docs.map(d => ({id: d.id, ...d.data()}));
-                    
                     AppState.adminData.exercises = allExercises.filter(ex => ex.status === 'approved' || !ex.status);
                     AppState.adminData.pendingExercises = allExercises.filter(ex => ex.status === 'pending');
-                    
                     this.render();
                 } catch(e) { console.error("Error cargando ejercicios:", e); }
             },
 
-            toggleExerciseForm() {
-                AppState.adminData.showExerciseForm = !AppState.adminData.showExerciseForm;
-                this.render();
-            },
+            toggleExerciseForm() { AppState.adminData.showExerciseForm = !AppState.adminData.showExerciseForm; this.render(); },
 
             async saveExercise(event) {
                 event.preventDefault();
                 const isAdmin = AppState.user.role === 'admin';
-                
                 const data = {
-                    name: document.getElementById('ex-name').value,
-                    image: document.getElementById('ex-image').value,
-                    preparation: document.getElementById('ex-prep').value,
-                    execution: document.getElementById('ex-exec').value,
+                    name: document.getElementById('ex-name').value, image: document.getElementById('ex-image').value,
+                    preparation: document.getElementById('ex-prep').value, execution: document.getElementById('ex-exec').value,
                     details: document.getElementById('ex-details').value,
                     primaryMuscles: Array.from(document.querySelectorAll('input[name="primaryMuscle"]:checked')).map(el => el.value),
                     secondaryMuscles: Array.from(document.querySelectorAll('input[name="secondaryMuscle"]:checked')).map(el => el.value),
-                    createdBy: AppState.user.id,
-                    creatorName: AppState.user.name,
-                    status: isAdmin ? 'approved' : 'pending', 
+                    createdBy: AppState.user.id, creatorName: AppState.user.name, status: isAdmin ? 'approved' : 'pending', 
                     createdAt: new Date().toISOString()
                 };
-
                 if (data.primaryMuscles.length === 0) return alert("Debes seleccionar al menos un músculo primario.");
-
                 try {
                     await addDoc(collection(db, "exercises"), data);
-                    if (isAdmin) {
-                        alert("¡Ejercicio añadido a la biblioteca con éxito! 🏋️‍♂️");
-                    } else {
-                        alert("¡Gracias! Tu ejercicio ha sido enviado. Un administrador lo revisará pronto para aprobarlo. ⏳");
-                    }
+                    if (isAdmin) alert("¡Ejercicio añadido a la biblioteca con éxito! 🏋️‍♂️");
+                    else alert("¡Gracias! Tu ejercicio ha sido enviado. Un administrador lo revisará pronto para aprobarlo. ⏳");
                     this.toggleExerciseForm();
                     this.loadExercises();
                 } catch (error) { console.error(error); alert("Error al guardar el ejercicio."); }
             },
 
             async approveExercise(exId) {
-                try {
-                    await updateDoc(doc(db, "exercises", exId), { status: "approved" });
-                    alert("✅ Ejercicio aprobado e incluido en la biblioteca global.");
-                    this.loadExercises();
-                } catch(e) { console.error(e); alert("Error al aprobar."); }
+                try { await updateDoc(doc(db, "exercises", exId), { status: "approved" }); alert("✅ Ejercicio aprobado."); this.loadExercises(); } 
+                catch(e) { console.error(e); alert("Error al aprobar."); }
             },
 
             async deleteExercise(exId, isRejection = false) {
                 const msg = isRejection ? "¿Estás seguro de rechazar y borrar este ejercicio propuesto?" : "¿Estás seguro de eliminar este ejercicio?";
                 if(confirm(msg)) {
-                    try {
-                        await deleteDoc(doc(db, "exercises", exId));
-                        this.loadExercises();
-                    } catch(e) { console.error(e); }
+                    try { await deleteDoc(doc(db, "exercises", exId)); this.loadExercises(); } 
+                    catch(e) { console.error(e); }
                 }
             },
 
@@ -496,28 +590,15 @@
                 this.render();
             },
 
-            toggleRoutineForm() {
-                AppState.showRoutineForm = !AppState.showRoutineForm;
-                AppState.routineDraft = { name: '', exercises: [] };
-                this.render();
-            },
+            toggleRoutineForm() { AppState.showRoutineForm = !AppState.showRoutineForm; AppState.routineDraft = { name: '', exercises: [] }; this.render(); },
 
             addExerciseToRoutine() {
                 const select = document.getElementById('routine-exercise-select');
                 const exId = select.value;
                 if (!exId) return alert("Selecciona un ejercicio primero.");
-                
-                const nameInput = document.getElementById('routine-name').value;
-                AppState.routineDraft.name = nameInput;
-
+                AppState.routineDraft.name = document.getElementById('routine-name').value;
                 const ex = AppState.adminData.exercises.find(e => e.id === exId);
-                AppState.routineDraft.exercises.push({
-                    id: ex.id,
-                    name: ex.name,
-                    sets: 4,
-                    reps: 10
-                });
-                
+                AppState.routineDraft.exercises.push({ id: ex.id, name: ex.name, sets: 4, reps: 10 });
                 this.render();
             },
 
@@ -530,35 +611,14 @@
             async saveRoutine(event) {
                 event.preventDefault();
                 const name = document.getElementById('routine-name').value;
-                
-                if (!name || AppState.routineDraft.exercises.length === 0) {
-                    return alert("Ingresa un nombre y al menos un ejercicio.");
-                }
-
+                if (!name || AppState.routineDraft.exercises.length === 0) return alert("Ingresa un nombre y al menos un ejercicio.");
                 const exercisesWithDetails = AppState.routineDraft.exercises.map((ex, i) => {
-                    return {
-                        ...ex,
-                        sets: parseInt(document.getElementById(`sets-${i}`).value),
-                        reps: parseInt(document.getElementById(`reps-${i}`).value)
-                    }
+                    return { ...ex, sets: parseInt(document.getElementById(`sets-${i}`).value), reps: parseInt(document.getElementById(`reps-${i}`).value) }
                 });
-
-                const newRoutine = {
-                    id: Date.now().toString(),
-                    name: name,
-                    exercises: exercisesWithDetails,
-                    createdAt: new Date().toISOString()
-                };
-
+                const newRoutine = { id: Date.now().toString(), name: name, exercises: exercisesWithDetails, createdAt: new Date().toISOString() };
                 AppState.routines.push(newRoutine);
-                
-                try {
-                    await FirebaseDB.saveAllData();
-                    alert("¡Rutina guardada con éxito! 🔥");
-                    this.toggleRoutineForm();
-                } catch(e) {
-                    alert("Error guardando la rutina.");
-                }
+                try { await FirebaseDB.saveAllData(); alert("¡Rutina guardada con éxito! 🔥"); this.toggleRoutineForm(); } 
+                catch(e) { alert("Error guardando la rutina."); }
             },
 
             async deleteRoutine(index) {
@@ -571,9 +631,7 @@
 
             async updateWeight(routineIndex, exerciseIndex, weightValue) {
                 AppState.routines[routineIndex].exercises[exerciseIndex].weight = weightValue;
-                try {
-                    await FirebaseDB.saveAllData();
-                } catch(e) { console.error("Error guardando el peso:", e); }
+                try { await FirebaseDB.saveAllData(); } catch(e) { console.error("Error guardando el peso:", e); }
             },
 
             updateStatusIndicator() {
@@ -850,6 +908,38 @@
                         `;
                     }
 
+                    const subStatus = AppState.subscription.status;
+                    if (subStatus === 'active') {
+                        const expText = new Date(AppState.subscription.expiresAt).toLocaleDateString('es-ES', { year: 'numeric', month: 'long', day: 'numeric' });
+                        return `
+                            <div class="space-y-6 animate-fade-in max-w-2xl mx-auto pb-10 text-center py-20">
+                                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">
+                                    <i data-lucide="check-circle" class="w-20 h-20 text-emerald-500 mx-auto mb-6"></i>
+                                    <h2 class="text-3xl font-black text-white mb-2">¡Tu plan está activo! 🎉</h2>
+                                    <p class="text-slate-400 text-lg mb-8">Tienes acceso completo hasta el <span class="text-emerald-400 font-bold">${expText}</span>.</p>
+                                    <button onclick="window.App.changeView('dashboard')" class="px-8 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-colors shadow-lg shadow-indigo-600/20">
+                                        Volver al Inicio
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    if (subStatus === 'pending') {
+                        return `
+                            <div class="space-y-6 animate-fade-in max-w-2xl mx-auto pb-10 text-center py-20">
+                                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-xl">
+                                    <i data-lucide="clock" class="w-20 h-20 text-amber-500 mx-auto mb-6 animate-pulse"></i>
+                                    <h2 class="text-3xl font-black text-white mb-2">Pago en Revisión ⏳</h2>
+                                    <p class="text-slate-400 text-lg mb-8">Estamos validando tu transferencia. Te habilitaremos pronto.</p>
+                                    <button onclick="window.App.changeView('dashboard')" class="px-8 py-3 bg-slate-700 hover:bg-slate-600 text-white font-bold rounded-xl transition-colors">
+                                        Volver al Inicio
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }
+
                     const plansHtml = AppState.plans.map(plan => `
                         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-indigo-500/30 transition-colors">
                             <div>
@@ -859,13 +949,16 @@
                                 ${AppState.user.role === 'trainer' ? `<p class="text-amber-400 text-xs font-bold mt-1 mb-2">Permite: ${plan.maxClients > 0 ? plan.maxClients + ' Alumnos' : 'Alumnos Ilimitados'}</p>` : ''}
                                 <p class="text-slate-400 mt-4 text-sm leading-relaxed">${plan.desc}</p>
                             </div>
-                            <button onclick="window.App.requestSubscription('${plan.id}', '${plan.name}')" class="mt-8 w-full px-4 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-2"><i data-lucide="message-circle" class="w-5 h-5"></i> Enviar Comprobante</button>
+                            <button onclick="window.App.requestSubscription('${plan.id}', '${plan.name}')" class="mt-8 w-full px-4 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-2"><i data-lucide="message-circle" class="w-5 h-5"></i> Reactivar / Comprar</button>
                         </div>
                     `).join('');
 
                     return `
                         <div class="space-y-6 animate-fade-in max-w-5xl mx-auto pb-10">
-                            <header class="text-center py-8"><h2 class="text-3xl font-black text-white">Planes Disponibles 🚀</h2><p class="text-slate-400 mt-2">Elige el plan que mejor se adapte a tus metas</p></header>
+                            <header class="text-center py-8">
+                                <h2 class="text-3xl font-black text-white">Planes Disponibles 🚀</h2>
+                                <p class="text-slate-400 mt-2">Elige el plan que mejor se adapte a tus metas para reactivar tu cuenta</p>
+                            </header>
                             ${AppState.plans.length > 0 ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">${plansHtml}</div>` : `<div class="text-center py-12 bg-slate-900 border border-slate-800 rounded-2xl"><p class="text-slate-500">No hay planes disponibles por el momento.</p></div>`}
                         </div>
                     `;
@@ -910,7 +1003,6 @@
                                     </div>
                                 </div>
                             </div>
-
                             <div class="mt-8 bg-slate-900 border border-slate-800 rounded-2xl p-6">
                                 <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="dumbbell" class="text-indigo-500"></i> Ejercicios Propuestos por Entrenadores</h3>
                                 <div class="space-y-4">
@@ -1006,11 +1098,9 @@
                 },
 
                 trainerPanel() {
-                    // VISTA: CREADOR DE RUTINA PARA EL ALUMNO
                     if (AppState.trainerData.view === 'create_routine' && AppState.trainerData.selectedClient) {
                         const client = AppState.trainerData.selectedClient;
                         const exOptions = AppState.adminData.exercises.map(ex => `<option value="${ex.id}">${ex.name}</option>`).join('');
-                        
                         const selectedExercisesHtml = AppState.routineDraft.exercises.map((ex, index) => `
                             <div class="bg-slate-800 p-4 rounded-xl flex items-center justify-between border border-slate-700 mb-3 animate-fade-in">
                                 <div class="font-bold text-white flex-1">${ex.name}</div>
@@ -1025,9 +1115,7 @@
                         return `
                             <div class="space-y-6 animate-zoom-in max-w-3xl mx-auto pb-10">
                                 <header class="flex justify-between items-center">
-                                    <div>
-                                        <h2 class="text-2xl font-bold text-white">Asignar Rutina a ${client.user.name}</h2>
-                                    </div>
+                                    <div><h2 class="text-2xl font-bold text-white">Asignar Rutina a ${client.user.name}</h2></div>
                                     <button onclick="window.App.cancelClientRoutine()" class="text-slate-400 hover:text-white px-4 py-2 bg-slate-800 rounded-xl">Cancelar</button>
                                 </header>
                                 <form onsubmit="window.App.saveClientRoutine(event)" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
@@ -1051,11 +1139,9 @@
                         `;
                     }
 
-                    // VISTA DE DETALLE DEL ALUMNO
                     if (AppState.trainerData.view === 'detail' && AppState.trainerData.selectedClient) {
                         const client = AppState.trainerData.selectedClient;
                         const clientRoutines = client.routines || [];
-                        
                         const routinesHtml = clientRoutines.map((r, i) => `
                             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 mb-3">
                                 <div class="flex justify-between items-start mb-3">
@@ -1109,7 +1195,6 @@
                         `;
                     }
 
-                    // VISTA DE LISTA (DASHBOARD DEL ENTRENADOR)
                     const maxClients = AppState.subscription.maxClients || 0;
                     const currentClients = AppState.trainerData.clients.length;
                     const pendingCount = AppState.trainerData.pendingClients.length;
@@ -1149,22 +1234,11 @@
                                     <div class="p-4 ${isFull ? 'bg-red-500/10 text-red-500' : 'bg-emerald-500/10 text-emerald-500'} rounded-xl"><i data-lucide="activity" class="w-8 h-8"></i></div>
                                 </div>
                             </div>
-
                             <header class="flex flex-col sm:flex-row sm:justify-between sm:items-end mb-6 gap-4">
                                 <div><h2 class="text-2xl font-bold text-white">Directorio de Alumnos</h2></div>
                             </header>
-
-                            ${isFull ? `
-                                <div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-400 text-sm font-bold mb-6 flex items-center gap-3">
-                                    <i data-lucide="alert-triangle" class="w-6 h-6 flex-shrink-0"></i> 
-                                    Has alcanzado el límite de tu plan. No aparecerás en la lista para nuevos atletas.
-                                </div>
-                            ` : ''}
-
-                            ${AppState.trainerData.clients.length > 0 
-                                ? `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${clientsList}</div>` 
-                                : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="users" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no tienes alumnos activos.</p></div>`
-                            }
+                            ${isFull ? `<div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-400 text-sm font-bold mb-6 flex items-center gap-3"><i data-lucide="alert-triangle" class="w-6 h-6 flex-shrink-0"></i> Has alcanzado el límite de tu plan. No aparecerás en la lista para nuevos atletas.</div>` : ''}
+                            ${AppState.trainerData.clients.length > 0 ? `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${clientsList}</div>` : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="users" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no tienes alumnos activos.</p></div>`}
                         </div>
                     `;
                 },
@@ -1194,6 +1268,81 @@
                 },
                 
                 routines() {
+                    // --- NUEVO: VISTA DE ENTRENAMIENTO ACTIVO ---
+                    if (AppState.activeWorkout) {
+                        const aw = AppState.activeWorkout;
+                        const currentEx = aw.exercises[aw.currentExIndex];
+                        const isLastExercise = aw.currentExIndex === aw.exercises.length - 1;
+                        const isLastSet = aw.currentSet === currentEx.sets;
+
+                        if (aw.isResting) {
+                            return `
+                                <div class="max-w-xl mx-auto text-center py-20 animate-fade-in">
+                                    <h2 class="text-4xl font-black text-white mb-2">¡Tiempo de Descanso! ⏱️</h2>
+                                    <p class="text-slate-400 mb-12">Recupera el aliento. Siguiente: ${isLastSet && !isLastExercise ? aw.exercises[aw.currentExIndex + 1].name : currentEx.name}</p>
+                                    
+                                    <div class="w-48 h-48 mx-auto bg-slate-900 border-4 border-indigo-500 rounded-full flex items-center justify-center mb-12 shadow-[0_0_50px_-12px_rgba(99,102,241,0.5)] animate-pulse-fast">
+                                        <span id="rest-timer-display" class="text-5xl font-black text-white">${window.App.formatTime(aw.restTimeRemaining)}</span>
+                                    </div>
+
+                                    <button onclick="window.App.skipRest()" class="px-8 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-colors">
+                                        Saltar Descanso
+                                    </button>
+                                </div>
+                            `;
+                        }
+
+                        return `
+                            <div class="max-w-2xl mx-auto animate-slide-up pb-20">
+                                <header class="flex justify-between items-center mb-6">
+                                    <div>
+                                        <p class="text-indigo-400 font-bold text-sm uppercase tracking-wider">${aw.routineName}</p>
+                                        <h2 class="text-2xl font-black text-white">Ejercicio ${aw.currentExIndex + 1} de ${aw.exercises.length}</h2>
+                                    </div>
+                                    <button onclick="window.App.cancelWorkout()" class="p-2 text-slate-500 hover:text-red-400 transition-colors"><i data-lucide="x" class="w-6 h-6"></i></button>
+                                </header>
+
+                                <div class="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
+                                    <div class="h-48 bg-slate-800 flex items-center justify-center border-b border-slate-700">
+                                        <i data-lucide="image" class="w-12 h-12 text-slate-600"></i>
+                                    </div>
+                                    
+                                    <div class="p-8">
+                                        <h3 class="text-3xl font-black text-white text-center mb-6">${currentEx.name}</h3>
+                                        
+                                        <div class="flex justify-center items-center gap-8 mb-10">
+                                            <div class="text-center">
+                                                <p class="text-slate-400 text-sm font-medium mb-1">Serie Actual</p>
+                                                <p class="text-4xl font-black text-indigo-400">${aw.currentSet} <span class="text-xl text-slate-500">/ ${currentEx.sets}</span></p>
+                                            </div>
+                                            <div class="h-12 w-px bg-slate-800"></div>
+                                            <div class="text-center">
+                                                <p class="text-slate-400 text-sm font-medium mb-1">Reps Meta</p>
+                                                <p class="text-4xl font-black text-white">${currentEx.reps}</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="grid grid-cols-2 gap-4 mb-8">
+                                            <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
+                                                <label class="block text-center text-slate-400 text-sm font-medium mb-2">Peso (lbs)</label>
+                                                <input type="number" id="workout-weight" value="${currentEx.weight || ''}" class="w-full bg-transparent text-center text-3xl font-black text-white focus:outline-none" placeholder="0">
+                                            </div>
+                                            <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
+                                                <label class="block text-center text-slate-400 text-sm font-medium mb-2">Reps Logradas</label>
+                                                <input type="number" id="workout-reps" value="${currentEx.reps}" class="w-full bg-transparent text-center text-3xl font-black text-white focus:outline-none">
+                                            </div>
+                                        </div>
+
+                                        <button onclick="window.App.finishSet()" class="w-full py-5 bg-emerald-600 hover:bg-emerald-500 text-white text-xl font-black rounded-2xl shadow-[0_0_40px_-10px_rgba(16,185,129,0.5)] transition-all transform hover:scale-[1.02]">
+                                            ${isLastSet && isLastExercise ? 'Finalizar Entrenamiento 🎉' : 'Terminé la Serie'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    // --- FIN VISTA ENTRENAMIENTO ---
+
                     if (AppState.showRoutineForm) {
                         const exOptions = AppState.adminData.exercises.map(ex => `<option value="${ex.id}">${ex.name}</option>`).join('');
                         const selectedExercisesHtml = AppState.routineDraft.exercises.map((ex, index) => `
@@ -1235,25 +1384,24 @@
                     }
 
                     const routinesList = AppState.routines.map((r, i) => `
-                        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-indigo-500/50 transition-colors shadow-lg">
-                            <div class="flex justify-between items-start mb-4">
-                                <div><h3 class="font-black text-xl text-white">${r.name}</h3><p class="text-sm text-indigo-400 font-bold mt-1">${r.exercises.length} Ejercicios</p></div>
-                                <button onclick="window.App.deleteRoutine(${i})" class="text-slate-500 hover:text-red-400 p-2 hover:bg-red-500/10 rounded-lg transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
-                            </div>
-                            <div class="space-y-2 mt-4 bg-slate-950/50 p-4 rounded-xl border border-slate-800/50">
-                                ${r.exercises.map((ex, exIndex) => `
-                                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center text-sm border-b border-slate-800/50 py-3 last:border-0 last:pb-0">
-                                        <span class="text-slate-300 font-medium mb-2 sm:mb-0">${ex.name}</span>
-                                        <div class="flex items-center justify-between w-full sm:w-auto gap-4">
+                        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-indigo-500/50 transition-colors shadow-lg flex flex-col justify-between">
+                            <div>
+                                <div class="flex justify-between items-start mb-4">
+                                    <div><h3 class="font-black text-xl text-white">${r.name}</h3><p class="text-sm text-indigo-400 font-bold mt-1">${r.exercises.length} Ejercicios</p></div>
+                                    <button onclick="window.App.deleteRoutine(${i})" class="text-slate-500 hover:text-red-400 p-2 hover:bg-red-500/10 rounded-lg transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                </div>
+                                <div class="space-y-2 mt-4 bg-slate-950/50 p-4 rounded-xl border border-slate-800/50 mb-6">
+                                    ${r.exercises.map((ex, exIndex) => `
+                                        <div class="flex justify-between items-center text-sm border-b border-slate-800/50 pb-2 last:border-0 last:pb-0">
+                                            <span class="text-slate-300 font-medium truncate pr-4">${ex.name}</span>
                                             <span class="text-indigo-400 font-bold px-2 py-1 bg-indigo-500/10 rounded-md whitespace-nowrap">${ex.sets} x ${ex.reps}</span>
-                                            <div class="flex items-center gap-2">
-                                                <input type="number" placeholder="0" value="${ex.weight || ''}" onchange="window.App.updateWeight(${i}, ${exIndex}, this.value)" class="w-16 bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-white text-center focus:outline-none focus:border-indigo-500 transition-colors">
-                                                <span class="text-slate-500 text-xs font-bold">lbs</span>
-                                            </div>
                                         </div>
-                                    </div>
-                                `).join('')}
+                                    `).join('')}
+                                </div>
                             </div>
+                            <button onclick="window.App.startWorkout(${i})" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-black rounded-xl flex items-center justify-center gap-2 transition-transform transform hover:scale-[1.02] shadow-lg shadow-emerald-600/20">
+                                <i data-lucide="play" class="w-5 h-5"></i> Iniciar Entrenamiento
+                            </button>
                         </div>
                     `).join('');
 
