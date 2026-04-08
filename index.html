@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="do">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LorHels Gym</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes zoomIn { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out forwards; }
+        .animate-slide-up { animation: slideUp 0.5s ease-out forwards; }
+        .animate-zoom-in { animation: zoomIn 0.5s ease-out forwards; }
+        input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 font-sans overflow-hidden selection:bg-indigo-500/30">
+
+    <div class="flex h-screen">
+        <aside id="sidebar" class="w-20 lg:w-64 border-r border-slate-800 bg-slate-900/50 flex flex-col transition-all duration-300 hidden">
+            <div class="h-20 flex items-center justify-center lg:justify-start lg:px-6 border-b border-slate-800">
+                <div class="bg-indigo-600 p-2 rounded-xl"><i data-lucide="dumbbell" class="text-white"></i></div>
+                <span class="ml-3 font-black text-xl text-white tracking-tight hidden lg:block">LorHels<span class="text-indigo-500">Gym</span></span>
+            </div>
+            <nav id="nav-links" class="flex-1 py-6 flex flex-col gap-2 px-3 overflow-y-auto"></nav>
+            <div class="p-4 border-t border-slate-800 bg-slate-900">
+                <div class="flex items-center gap-3 px-3 py-2 rounded-xl bg-slate-800/50 text-slate-400 text-xs mb-3">
+                    <div id="status-dot" class="w-2 h-2 rounded-full bg-slate-500"></div>
+                    <span id="status-text" class="hidden lg:block font-medium">Estado: ...</span>
+                </div>
+                <button onclick="window.App.logout()" class="w-full flex items-center justify-center lg:justify-start gap-3 px-3 py-2 rounded-xl text-red-400 hover:bg-red-500/10 transition-colors">
+                    <i data-lucide="log-out" class="w-4 h-4"></i><span class="hidden lg:block text-sm font-bold">Cerrar Sesión</span>
+                </button>
+            </div>
+        </aside>
+        <main class="flex-1 overflow-y-auto p-4 lg:p-8 relative">
+            <div id="main-content" class="max-w-5xl mx-auto h-full"></div>
+        </main>
+    </div>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+        // Añadimos deleteDoc a las importaciones
+        import { getFirestore, doc, setDoc, getDoc, collection, query, where, getDocs, updateDoc, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyB0oo_S8sZnguFoC18zmJrZMJPBFg9OhbI",
+            authDomain: "lorhels-gym.firebaseapp.com",
+            projectId: "lorhels-gym",
+            storageBucket: "lorhels-gym.firebasestorage.app",
+            messagingSenderId: "90007984643",
+            appId: "1:90007984643:web:35d579f940206c3a924c36"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // --- ESTADO GLOBAL ---
+        const AppState = {
+            isAuthenticated: false, authMode: 'login', currentView: 'dashboard',
+            user: { id: '', name: '', role: 'user', email: '', trainerId: null },
+            subscription: { plan: null, status: 'inactive', expiresAt: null },
+            profile: { weight: 0, height: 0 },
+            routines: [], 
+            workoutHistory: [],
+            showRoutineForm: false, 
+            routineDraft: { name: '', exercises: [] },
+            plans: [], // <-- NUEVO: Planes dinámicos para usuarios/entrenadores
+            adminData: { 
+                pendingUsers: [],
+                activeUsers: [],
+                stats: { athletes: 0, trainers: 0, activePlans: 0, exercises: 0 },
+                exercises: [], 
+                showExerciseForm: false,
+                plans: [], // <-- NUEVO: Planes para el panel de admin
+                showPlanForm: false // <-- NUEVO: Control del formulario de planes
+            },
+            trainersList: []
+        };
+
+        const FirebaseDB = {
+            getUserRef() { return auth.currentUser ? doc(db, "users", auth.currentUser.uid) : null; },
+            async saveAllData() {
+                const ref = this.getUserRef();
+                if (!ref) return;
+                try {
+                    await setDoc(ref, {
+                        user: AppState.user, subscription: AppState.subscription, profile: AppState.profile,
+                        routines: AppState.routines, workoutHistory: AppState.workoutHistory
+                    });
+                } catch (error) { console.error("Error guardando:", error); }
+            },
+            async loadAllData() {
+                const ref = this.getUserRef();
+                if (!ref) return false;
+                try {
+                    const docSnap = await getDoc(ref);
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
+                        AppState.user = data.user || AppState.user;
+                        AppState.subscription = data.subscription || AppState.subscription;
+                        AppState.profile = data.profile || AppState.profile;
+                        AppState.routines = data.routines || AppState.routines;
+                        AppState.workoutHistory = data.workoutHistory || AppState.workoutHistory;
+                        return true;
+                    }
+                    return false;
+                } catch (error) { return false; }
+            }
+        };
+
+        const App = {
+            init() {
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        AppState.isAuthenticated = true;
+                        const dataExists = await FirebaseDB.loadAllData();
+                        if (!dataExists) {
+                            AppState.user.id = user.uid;
+                            AppState.user.email = user.email;
+                            await FirebaseDB.saveAllData();
+                        }
+                        this.changeView('dashboard');
+                    } else {
+                        AppState.isAuthenticated = false;
+                        this.resetState();
+                        this.render();
+                    }
+                });
+            },
+
+            resetState() {
+                AppState.user = { id: '', name: '', role: 'user', email: '', trainerId: null };
+                AppState.subscription = { plan: null, status: 'inactive', expiresAt: null };
+                AppState.profile = { weight: 0, height: 0 };
+                AppState.routines = []; AppState.workoutHistory = [];
+                AppState.routineDraft = { name: '', exercises: [] };
+                AppState.plans = [];
+            },
+
+            // --- AUTENTICACIÓN ---
+            toggleAuthMode() { AppState.authMode = AppState.authMode === 'login' ? 'register' : 'login'; this.render(); },
+            
+            async handleAuthForm(event) {
+                event.preventDefault();
+                const email = document.getElementById('auth-email').value;
+                const password = document.getElementById('auth-pass').value;
+                
+                try {
+                    if (AppState.authMode === 'login') {
+                        await signInWithEmailAndPassword(auth, email, password);
+                    } else {
+                        AppState.user.name = document.getElementById('auth-name').value;
+                        AppState.user.role = document.getElementById('auth-role').value;
+                        await createUserWithEmailAndPassword(auth, email, password);
+                    }
+                } catch (error) {
+                    alert("Error en la autenticación: " + error.message);
+                }
+            },
+            async logout() { await signOut(auth); },
+
+            // --- NAVEGACIÓN Y LÓGICA DE ROLES ---
+            changeView(view) {
+                AppState.currentView = view;
+                if (view === 'adminPanel') this.loadUsersAdmin();
+                if (view === 'dashboard' && AppState.user.role === 'admin') this.loadAdminStats();
+                if (view === 'dashboard' && AppState.user.role === 'user' && !AppState.user.trainerId) this.loadTrainers();
+                if (view === 'exercises' || view === 'routines') this.loadExercises();
+                // NUEVO: Cargar los planes cuando se entra a la vista
+                if (view === 'plans') {
+                    if (AppState.user.role === 'admin') this.loadPlansAdmin();
+                    else this.loadUserPlans();
+                }
+                this.render();
+            },
+
+            // --- LÓGICA DE PERFIL Y PAGOS ---
+            async saveProfile() {
+                const weight = document.getElementById('profile-weight').value;
+                const height = document.getElementById('profile-height').value;
+
+                AppState.profile.weight = parseFloat(weight);
+                AppState.profile.height = parseInt(height);
+
+                try {
+                    await FirebaseDB.saveAllData();
+                    alert("¡Perfil actualizado correctamente! 💪");
+                } catch (error) {
+                    alert("Error al guardar los datos.");
+                }
+            },
+
+            requestSubscription(planId, planName) {
+                const adminPhone = "18091234567";
+                const text = `Hola Admin! Soy ${AppState.user.name} (${AppState.user.role}). Acabo de transferir para el *${planName}*. ID: ${AppState.user.id}`;
+                AppState.subscription.plan = planId;
+                AppState.subscription.status = 'pending';
+                FirebaseDB.saveAllData();
+                alert("Serás redirigido a WhatsApp con tu comprobante.");
+                window.open(`https://wa.me/${adminPhone}?text=${encodeURIComponent(text)}`, '_blank');
+                this.changeView('dashboard');
+            },
+
+            // --- GESTIÓN DE PLANES DINÁMICOS ---
+            async loadPlansAdmin() {
+                try {
+                    const snap = await getDocs(collection(db, "plans"));
+                    AppState.adminData.plans = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    this.render();
+                } catch(e) { console.error("Error cargando planes:", e); }
+            },
+
+            async loadUserPlans() {
+                try {
+                    // Solo trae los planes que corresponden al rol del usuario (user o trainer)
+                    const q = query(collection(db, "plans"), where("targetRole", "==", AppState.user.role));
+                    const snap = await getDocs(q);
+                    AppState.plans = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    this.render();
+                } catch(e) { console.error("Error cargando planes:", e); }
+            },
+
+            togglePlanForm() {
+                AppState.adminData.showPlanForm = !AppState.adminData.showPlanForm;
+                this.render();
+            },
+
+            async savePlan(event) {
+                event.preventDefault();
+                const data = {
+                    name: document.getElementById('plan-name').value,
+                    price: document.getElementById('plan-price').value,
+                    desc: document.getElementById('plan-desc').value,
+                    targetRole: document.getElementById('plan-role').value,
+                    createdAt: new Date().toISOString()
+                };
+
+                try {
+                    await addDoc(collection(db, "plans"), data);
+                    alert("¡Plan creado exitosamente! 🚀");
+                    this.togglePlanForm();
+                    this.loadPlansAdmin();
+                } catch(e) {
+                    alert("Error al guardar el plan.");
+                }
+            },
+
+            async deletePlan(planId) {
+                if(confirm("¿Estás seguro de eliminar este plan?")) {
+                    try {
+                        await deleteDoc(doc(db, "plans", planId));
+                        this.loadPlansAdmin();
+                    } catch(e) { console.error(e); }
+                }
+            },
+
+            // --- LÓGICA ADMIN Y ENTRENADORES ---
+            async loadAdminStats() {
+                try {
+                    const snap = await getDocs(collection(db, "users"));
+                    let athletes = 0, trainers = 0, activePlans = 0;
+                    snap.forEach(doc => {
+                        const data = doc.data();
+                        if (data.user?.role === 'user') athletes++;
+                        if (data.user?.role === 'trainer') trainers++;
+                        if (data.subscription?.status === 'active') activePlans++;
+                    });
+                    const exSnap = await getDocs(collection(db, "exercises"));
+                    AppState.adminData.stats = { athletes, trainers, activePlans, exercises: exSnap.size }; 
+                    this.render();
+                } catch(e) { console.error("Error cargando stats:", e); }
+            },
+
+            async loadUsersAdmin() {
+                try {
+                    const snap = await getDocs(collection(db, "users"));
+                    const allUsers = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    AppState.adminData.pendingUsers = allUsers.filter(u => u.subscription?.status === 'pending');
+                    AppState.adminData.activeUsers = allUsers.filter(u => u.subscription?.status === 'active');
+                    this.render();
+                } catch(e) { console.error(e); }
+            },
+
+            async approveUser(userId) {
+                try {
+                    await updateDoc(doc(db, "users", userId), { "subscription.status": "active" });
+                    alert("✅ Usuario aprobado con éxito.");
+                    this.loadUsersAdmin(); 
+                } catch(e) { console.error(e); alert("Error al aprobar."); }
+            },
+
+            // --- GESTIÓN DE EJERCICIOS ---
+            async loadExercises() {
+                try {
+                    const snap = await getDocs(collection(db, "exercises"));
+                    AppState.adminData.exercises = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    this.render();
+                } catch(e) { console.error("Error cargando ejercicios:", e); }
+            },
+
+            toggleExerciseForm() {
+                AppState.adminData.showExerciseForm = !AppState.adminData.showExerciseForm;
+                this.render();
+            },
+
+            async saveExercise(event) {
+                event.preventDefault();
+                const data = {
+                    name: document.getElementById('ex-name').value,
+                    image: document.getElementById('ex-image').value,
+                    preparation: document.getElementById('ex-prep').value,
+                    execution: document.getElementById('ex-exec').value,
+                    details: document.getElementById('ex-details').value,
+                    primaryMuscles: Array.from(document.querySelectorAll('input[name="primaryMuscle"]:checked')).map(el => el.value),
+                    secondaryMuscles: Array.from(document.querySelectorAll('input[name="secondaryMuscle"]:checked')).map(el => el.value),
+                    createdAt: new Date().toISOString()
+                };
+
+                if (data.primaryMuscles.length === 0) return alert("Debes seleccionar al menos un músculo primario.");
+
+                try {
+                    await addDoc(collection(db, "exercises"), data);
+                    alert("¡Ejercicio creado con éxito! 🏋️‍♂️");
+                    this.toggleExerciseForm();
+                    this.loadExercises();
+                } catch (error) { console.error(error); alert("Error al guardar el ejercicio."); }
+            },
+
+            async loadTrainers() {
+                try {
+                    const q = query(collection(db, "users"), where("user.role", "==", "trainer"));
+                    const snap = await getDocs(q);
+                    AppState.trainersList = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    this.render();
+                } catch(e) { console.error(e); }
+            },
+
+            async selectTrainer(trainerId) {
+                AppState.user.trainerId = trainerId;
+                await FirebaseDB.saveAllData();
+                alert("¡Entrenador seleccionado con éxito! Ya puedes ver tus rutinas.");
+                this.render();
+            },
+
+            // --- GESTIÓN DE RUTINAS ---
+            toggleRoutineForm() {
+                AppState.showRoutineForm = !AppState.showRoutineForm;
+                AppState.routineDraft = { name: '', exercises: [] };
+                this.render();
+            },
+
+            addExerciseToRoutine() {
+                const select = document.getElementById('routine-exercise-select');
+                const exId = select.value;
+                if (!exId) return alert("Selecciona un ejercicio primero.");
+                
+                const nameInput = document.getElementById('routine-name').value;
+                AppState.routineDraft.name = nameInput;
+
+                const ex = AppState.adminData.exercises.find(e => e.id === exId);
+                AppState.routineDraft.exercises.push({
+                    id: ex.id,
+                    name: ex.name,
+                    sets: 4,
+                    reps: 10
+                });
+                
+                this.render();
+            },
+
+            removeExerciseFromRoutine(index) {
+                AppState.routineDraft.name = document.getElementById('routine-name').value;
+                AppState.routineDraft.exercises.splice(index, 1);
+                this.render();
+            },
+
+            async saveRoutine(event) {
+                event.preventDefault();
+                const name = document.getElementById('routine-name').value;
+                
+                if (!name || AppState.routineDraft.exercises.length === 0) {
+                    return alert("Ingresa un nombre y al menos un ejercicio.");
+                }
+
+                const exercisesWithDetails = AppState.routineDraft.exercises.map((ex, i) => {
+                    return {
+                        ...ex,
+                        sets: parseInt(document.getElementById(`sets-${i}`).value),
+                        reps: parseInt(document.getElementById(`reps-${i}`).value)
+                    }
+                });
+
+                const newRoutine = {
+                    id: Date.now().toString(),
+                    name: name,
+                    exercises: exercisesWithDetails,
+                    createdAt: new Date().toISOString()
+                };
+
+                AppState.routines.push(newRoutine);
+                
+                try {
+                    await FirebaseDB.saveAllData();
+                    alert("¡Rutina guardada con éxito! 🔥");
+                    this.toggleRoutineForm();
+                } catch(e) {
+                    alert("Error guardando la rutina.");
+                }
+            },
+
+            async deleteRoutine(index) {
+                if(confirm("¿Estás seguro de que deseas eliminar esta rutina?")) {
+                    AppState.routines.splice(index, 1);
+                    await FirebaseDB.saveAllData();
+                    this.render();
+                }
+            },
+
+            async updateWeight(routineIndex, exerciseIndex, weightValue) {
+                AppState.routines[routineIndex].exercises[exerciseIndex].weight = weightValue;
+                try {
+                    await FirebaseDB.saveAllData();
+                } catch(e) { console.error("Error guardando el peso:", e); }
+            },
+
+            // --- RENDERIZADO Y VISTAS ---
+            updateStatusIndicator() {
+                const dot = document.getElementById('status-dot'); const text = document.getElementById('status-text');
+                if(!dot || !text) return;
+                if (AppState.user.role === 'admin') { dot.className = "w-2 h-2 rounded-full bg-purple-500"; text.innerText = "Modo: Admin"; }
+                else {
+                    const status = AppState.subscription.status;
+                    if (status === 'active') { dot.className = "w-2 h-2 rounded-full bg-emerald-500"; text.innerText = AppState.user.role === 'trainer' ? "Entrenador Activo" : "Plan Activo"; }
+                    else if (status === 'pending') { dot.className = "w-2 h-2 rounded-full bg-amber-500"; text.innerText = "Validando Pago"; }
+                    else { dot.className = "w-2 h-2 rounded-full bg-red-500"; text.innerText = "Sin Suscripción"; }
+                }
+            },
+
+            render() {
+                const main = document.getElementById('main-content');
+                const sidebar = document.getElementById('sidebar');
+
+                if (!AppState.isAuthenticated) {
+                    sidebar.classList.add('hidden'); main.innerHTML = this.views.auth(); lucide.createIcons(); return;
+                }
+
+                sidebar.classList.remove('hidden');
+                sidebar.style.display = 'flex';
+                this.renderNav();
+                this.updateStatusIndicator();
+                
+                switch(AppState.currentView) {
+                    case 'dashboard': main.innerHTML = this.views.dashboard(); break;
+                    case 'routines': main.innerHTML = this.views.routines(); break;
+                    case 'profile': main.innerHTML = this.views.profile(); break;
+                    case 'plans': main.innerHTML = this.views.plans(); break;
+                    case 'adminPanel': main.innerHTML = this.views.adminPanel(); break;
+                    case 'trainerPanel': main.innerHTML = this.views.trainerPanel(); break;
+                    case 'exercises': main.innerHTML = this.views.exercises(); break; 
+                }
+                lucide.createIcons();
+            },
+
+            renderNav() {
+                let navLinks = [];
+                if (AppState.user.role === 'admin') {
+                    navLinks = [
+                        { id: 'dashboard', icon: 'layout-dashboard', label: 'Inicio Admin' },
+                        { id: 'adminPanel', icon: 'shield-check', label: 'Aprobaciones' },
+                        { id: 'exercises', icon: 'dumbbell', label: 'Ejercicios' },
+                        { id: 'routines', icon: 'calendar', label: 'Rutinas' },
+                        { id: 'plans', icon: 'credit-card', label: 'Planes' } // <-- Añadimos Planes al Admin
+                    ];
+                } else if (AppState.user.role === 'trainer') {
+                    navLinks = [
+                        { id: 'dashboard', icon: 'layout-dashboard', label: 'Inicio Entrenador' },
+                        { id: 'trainerPanel', icon: 'users', label: 'Mis Alumnos' },
+                        { id: 'plans', icon: 'credit-card', label: 'Planes' },
+                        { id: 'profile', icon: 'user', label: 'Perfil' }
+                    ];
+                } else {
+                    navLinks = [
+                        { id: 'dashboard', icon: 'activity', label: 'Inicio' },
+                        { id: 'routines', icon: 'calendar', label: 'Rutinas' },
+                        { id: 'plans', icon: 'credit-card', label: 'Planes' },
+                        { id: 'profile', icon: 'user', label: 'Perfil' },
+                    ];
+                }
+
+                document.getElementById('nav-links').innerHTML = navLinks.map(item => `
+                    <button onclick="window.App.changeView('${item.id}')" class="flex items-center gap-4 px-4 py-3 rounded-xl transition-all ${
+                        AppState.currentView === item.id ? 'bg-indigo-600/10 text-indigo-400 font-bold' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'
+                    }">
+                        <i data-lucide="${item.icon}" class="w-5 h-5"></i><span class="hidden lg:block">${item.label}</span>
+                    </button>
+                `).join('');
+            },
+
+            views: {
+                auth() {
+                    const isLogin = AppState.authMode === 'login';
+                    return `
+                        <div class="flex items-center justify-center h-full animate-zoom-in mt-10">
+                            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl w-full max-w-md">
+                                <div class="text-center mb-8">
+                                    <div class="bg-indigo-600 p-3 rounded-xl inline-block mb-4"><i data-lucide="dumbbell" class="text-white w-8 h-8"></i></div>
+                                    <h1 class="text-2xl font-black text-white">LorHels Gym</h1>
+                                </div>
+                                <form onsubmit="window.App.handleAuthForm(event)" class="space-y-4">
+                                    ${!isLogin ? `
+                                    <div>
+                                        <label class="text-sm text-slate-400 block mb-1">Nombre Completo</label>
+                                        <input type="text" id="auth-name" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none"/>
+                                    </div>
+                                    <div>
+                                        <label class="text-sm text-slate-400 block mb-1">Tipo de Cuenta</label>
+                                        <select id="auth-role" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none">
+                                            <option value="user">Atleta (Usuario Normal)</option>
+                                            <option value="trainer">Entrenador Profesional</option>
+                                            <option value="admin">Administrador (Pruebas)</option>
+                                        </select>
+                                    </div>` : ''}
+                                    <div>
+                                        <label class="text-sm text-slate-400 block mb-1">Correo Electrónico</label>
+                                        <input type="email" id="auth-email" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none"/>
+                                    </div>
+                                    <div>
+                                        <label class="text-sm text-slate-400 block mb-1">Contraseña</label>
+                                        <input type="password" id="auth-pass" required minlength="6" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none"/>
+                                    </div>
+                                    <button type="submit" class="w-full mt-6 px-4 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-white transition-colors shadow-lg shadow-indigo-600/20">
+                                        ${isLogin ? 'Ingresar' : 'Registrarme'}
+                                    </button>
+                                </form>
+                                <div class="text-center mt-6">
+                                    <button onclick="window.App.toggleAuthMode()" class="text-sm text-indigo-400 hover:text-indigo-300">
+                                        ${isLogin ? '¿No tienes cuenta? Regístrate aquí' : '¿Ya tienes cuenta? Inicia sesión'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                },
+
+                dashboard() {
+                    if (AppState.user.role === 'admin') {
+                        const stats = AppState.adminData.stats;
+                        return `
+                            <div class="space-y-6 animate-fade-in">
+                                <header class="mb-8">
+                                    <h1 class="text-3xl font-black text-white">Resumen Administrativo</h1>
+                                    <p class="text-slate-400">Visión general de LorHels Gym</p>
+                                </header>
+                                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                                    <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center gap-4">
+                                        <div class="p-3 bg-blue-500/10 text-blue-500 rounded-xl"><i data-lucide="users" class="w-8 h-8"></i></div>
+                                        <div><p class="text-slate-400 text-sm">Atletas</p><p class="text-2xl font-black text-white">${stats.athletes}</p></div>
+                                    </div>
+                                    <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center gap-4">
+                                        <div class="p-3 bg-indigo-500/10 text-indigo-500 rounded-xl"><i data-lucide="award" class="w-8 h-8"></i></div>
+                                        <div><p class="text-slate-400 text-sm">Entrenadores</p><p class="text-2xl font-black text-white">${stats.trainers}</p></div>
+                                    </div>
+                                    <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center gap-4">
+                                        <div class="p-3 bg-emerald-500/10 text-emerald-500 rounded-xl"><i data-lucide="credit-card" class="w-8 h-8"></i></div>
+                                        <div><p class="text-slate-400 text-sm">Planes Activos</p><p class="text-2xl font-black text-white">${stats.activePlans}</p></div>
+                                    </div>
+                                    <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center gap-4">
+                                        <div class="p-3 bg-purple-500/10 text-purple-500 rounded-xl"><i data-lucide="dumbbell" class="w-8 h-8"></i></div>
+                                        <div><p class="text-slate-400 text-sm">Ejercicios</p><p class="text-2xl font-black text-white">${stats.exercises}</p></div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+                    if (AppState.user.role === 'trainer') {
+                        return `
+                            <div class="space-y-6 animate-fade-in text-center py-12">
+                                <i data-lucide="users" class="w-20 h-20 text-blue-500 mx-auto mb-4"></i>
+                                <h1 class="text-3xl font-black text-white">Hola, Entrenador ${AppState.user.name}</h1>
+                                ${AppState.subscription.status === 'active' 
+                                    ? `<p class="text-slate-400">Tu panel está activo. Revisa a tus alumnos.</p><button onclick="window.App.changeView('trainerPanel')" class="mt-4 px-6 py-2 bg-blue-600 rounded-xl text-white font-bold">Mis Alumnos</button>` 
+                                    : `<p class="text-red-400 font-bold mt-2">Activa tu plan para acceder a tu panel.</p><button onclick="window.App.changeView('plans')" class="mt-4 px-6 py-2 bg-indigo-600 rounded-xl text-white font-bold">Ver Planes</button>`}
+                            </div>
+                        `;
+                    }
+
+                    const subStatus = AppState.subscription.status;
+                    if (subStatus === 'inactive') return `<div class="text-center py-12"><i data-lucide="lock" class="w-20 h-20 text-red-500 mx-auto mb-4"></i><h1 class="text-3xl font-black text-white">Cuenta Inactiva</h1><button onclick="window.App.changeView('plans')" class="mt-6 px-8 py-3 bg-indigo-600 rounded-xl text-white font-bold">Ver Planes</button></div>`;
+                    if (subStatus === 'pending') return `<div class="text-center py-12"><i data-lucide="clock" class="w-20 h-20 text-amber-500 mx-auto mb-4 animate-pulse"></i><h1 class="text-3xl font-black text-white">Pago en Revisión</h1><p class="text-slate-400">Te habilitaremos pronto.</p></div>`;
+
+                    if (!AppState.user.trainerId) {
+                        const trainersHtml = AppState.trainersList.map(t => `
+                            <div class="bg-slate-800 p-4 rounded-xl flex justify-between items-center border border-slate-700">
+                                <div class="flex items-center gap-3"><div class="p-2 bg-slate-900 rounded-full"><i data-lucide="user" class="text-indigo-400"></i></div><div><p class="font-bold text-white">${t.user.name}</p></div></div>
+                                <button onclick="window.App.selectTrainer('${t.user.id}')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold">Seleccionar</button>
+                            </div>
+                        `).join('');
+
+                        return `
+                            <div class="space-y-6 animate-fade-in text-center py-12 max-w-2xl mx-auto">
+                                <i data-lucide="star" class="w-16 h-16 text-indigo-500 mx-auto mb-4"></i>
+                                <h1 class="text-3xl font-black text-white">¡Plan Activado! 🎉</h1>
+                                <p class="text-slate-400 mb-8">Selecciona a tu entrenador personal para comenzar.</p>
+                                <div class="space-y-3 text-left">
+                                    ${trainersHtml || '<p class="text-slate-500 text-center">No hay entrenadores disponibles en este momento.</p>'}
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    const nextRoutine = AppState.routines[0];
+                    return `
+                        <div class="space-y-6 animate-fade-in">
+                            <header><h1 class="text-3xl font-black text-white">¡Hola, ${AppState.user.name}! 👋</h1><p class="text-slate-400">Entrenador asignado. Listo para romper tus límites.</p></header>
+                            <div class="bg-gradient-to-br from-indigo-900 to-slate-900 border border-indigo-800 rounded-2xl p-6 shadow-xl">
+                                <p class="text-indigo-300 text-sm font-bold uppercase tracking-wider">Próxima Rutina</p>
+                                <h3 class="text-2xl font-bold text-white mt-1">${nextRoutine ? nextRoutine.name : 'Tu entrenador aún no ha asignado rutinas.'}</h3>
+                            </div>
+                        </div>
+                    `;
+                },
+
+                // --- VISTA DINÁMICA DE PLANES ---
+                plans() {
+                    // VISTA ADMIN: Crear y listar todos los planes
+                    if (AppState.user.role === 'admin') {
+                        if (AppState.adminData.showPlanForm) {
+                            return `
+                                <div class="space-y-6 animate-zoom-in max-w-2xl mx-auto pb-10">
+                                    <header class="flex justify-between items-center">
+                                        <h2 class="text-2xl font-bold text-white">Crear Nuevo Plan</h2>
+                                        <button onclick="window.App.togglePlanForm()" class="text-slate-400 hover:text-white px-4 py-2 bg-slate-800 rounded-xl">Cancelar</button>
+                                    </header>
+                                    <form onsubmit="window.App.savePlan(event)" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Nombre del Plan</label>
+                                            <input type="text" id="plan-name" required placeholder="Ej: Plan Mensual Elite" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                        </div>
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Precio (Incluye moneda)</label>
+                                            <input type="text" id="plan-price" required placeholder="Ej: RD$ 1,500" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                        </div>
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Descripción / Beneficios</label>
+                                            <textarea id="plan-desc" rows="2" required placeholder="Ej: Acceso a rutinas por 30 días" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"></textarea>
+                                        </div>
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Dirigido a</label>
+                                            <select id="plan-role" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                                <option value="user">Atletas (Usuarios normales)</option>
+                                                <option value="trainer">Entrenadores Profesionales</option>
+                                            </select>
+                                        </div>
+                                        <button type="submit" class="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg mt-4">Guardar Plan</button>
+                                    </form>
+                                </div>
+                            `;
+                        }
+
+                        const plansListAdmin = AppState.adminData.plans.map(p => `
+                            <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 flex justify-between items-center hover:border-indigo-500/50 transition-colors">
+                                <div>
+                                    <h3 class="font-bold text-white text-lg">${p.name} <span class="text-[10px] px-2 py-1 ml-2 ${p.targetRole === 'trainer' ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'} rounded-md border uppercase">${p.targetRole}</span></h3>
+                                    <p class="text-indigo-400 font-bold mt-1">${p.price}</p>
+                                    <p class="text-slate-400 text-sm mt-1">${p.desc}</p>
+                                </div>
+                                <button onclick="window.App.deletePlan('${p.id}')" class="text-slate-500 hover:text-red-400 p-3 hover:bg-red-500/10 rounded-xl transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                            </div>
+                        `).join('');
+
+                        return `
+                            <div class="space-y-6 animate-fade-in pb-10">
+                                <header class="flex justify-between items-center mb-8">
+                                    <div><h1 class="text-3xl font-black text-white">Gestión de Planes</h1><p class="text-slate-400">Controla los precios y suscripciones</p></div>
+                                    <button onclick="window.App.togglePlanForm()" class="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg"><i data-lucide="plus" class="w-5 h-5"></i> Nuevo Plan</button>
+                                </header>
+                                ${AppState.adminData.plans.length > 0 ? `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${plansListAdmin}</div>` : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="credit-card" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no hay planes creados.</p></div>`}
+                            </div>
+                        `;
+                    }
+
+                    // VISTA ATLETAS / ENTRENADORES: Mostrar los planes dinámicos correspondientes a su rol
+                    const plansHtml = AppState.plans.map(plan => `
+                        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-indigo-500/30 transition-colors">
+                            <div>
+                                <h3 class="text-xl font-black text-white">${plan.name}</h3>
+                                <p class="text-3xl font-bold text-indigo-400 mt-2">${plan.price}</p>
+                                <p class="text-slate-400 mt-4 text-sm leading-relaxed">${plan.desc}</p>
+                            </div>
+                            <button onclick="window.App.requestSubscription('${plan.id}', '${plan.name}')" class="mt-8 w-full px-4 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-2"><i data-lucide="message-circle" class="w-5 h-5"></i> Enviar Comprobante</button>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="space-y-6 animate-fade-in max-w-5xl mx-auto pb-10">
+                            <header class="text-center py-8"><h2 class="text-3xl font-black text-white">Planes Disponibles 🚀</h2><p class="text-slate-400 mt-2">Elige el plan que mejor se adapte a tus metas</p></header>
+                            ${AppState.plans.length > 0 ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">${plansHtml}</div>` : `<div class="text-center py-12 bg-slate-900 border border-slate-800 rounded-2xl"><p class="text-slate-500">No hay planes disponibles por el momento.</p></div>`}
+                        </div>
+                    `;
+                },
+
+                adminPanel() {
+                    const generateUserList = (users, isPending) => users.map(u => `
+                        <div class="flex items-center justify-between border-b border-slate-800 pb-4 mb-4 last:border-0 last:pb-0 last:mb-0">
+                            <div class="flex items-center gap-4">
+                                <div class="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center"><i data-lucide="user" class="text-slate-400"></i></div>
+                                <div>
+                                    <p class="font-bold text-white">${u.user.name || 'Sin Nombre'} <span class="text-xs px-2 py-1 bg-slate-800 rounded-lg text-slate-400 ml-2">${u.user.role}</span></p>
+                                    <p class="text-xs ${isPending ? 'text-amber-400' : 'text-emerald-400'}">Plan ID: ${u.subscription?.plan || 'Ninguno'}</p>
+                                </div>
+                            </div>
+                            ${isPending 
+                                ? `<button onclick="window.App.approveUser('${u.id}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition-colors">Aprobar</button>`
+                                : `<span class="px-3 py-1 bg-emerald-500/10 text-emerald-500 text-xs font-bold rounded-lg border border-emerald-500/20">Activo</span>`
+                            }
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="space-y-6 animate-fade-in">
+                            <header><h2 class="text-2xl font-bold text-white"><i data-lucide="shield-check" class="text-purple-500 inline mr-2"></i> Gestión de Suscripciones</h2></header>
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                                    <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="clock" class="text-amber-500"></i> Pendientes de Aprobación</h3>
+                                    <div class="space-y-2">
+                                        ${AppState.adminData.pendingUsers.length > 0 ? generateUserList(AppState.adminData.pendingUsers, true) : '<p class="text-slate-500 text-center py-4">No hay pagos pendientes.</p>'}
+                                    </div>
+                                </div>
+                                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                                    <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="check-circle" class="text-emerald-500"></i> Usuarios Activos</h3>
+                                    <div class="space-y-2 h-96 overflow-y-auto pr-2">
+                                        ${AppState.adminData.activeUsers.length > 0 ? generateUserList(AppState.adminData.activeUsers, false) : '<p class="text-slate-500 text-center py-4">No hay usuarios activos aún.</p>'}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                },
+
+                exercises() {
+                    const muscles = ['Pecho', 'Espalda', 'Hombros', 'Bíceps', 'Tríceps', 'Cuádriceps', 'Isquiotibiales', 'Glúteos', 'Pantorrillas', 'Abdomen'];
+                    const createCheckboxes = (name) => muscles.map(m => `
+                        <label class="flex items-center gap-2 text-slate-300 text-sm p-2 bg-slate-800/50 rounded-lg border border-slate-700/50 hover:bg-slate-700 cursor-pointer">
+                            <input type="checkbox" name="${name}" value="${m}" class="rounded bg-slate-900 border-slate-600 text-indigo-500 focus:ring-indigo-500"> 
+                            ${m}
+                        </label>
+                    `).join('');
+
+                    if (AppState.adminData.showExerciseForm) {
+                        return `
+                            <div class="space-y-6 animate-zoom-in max-w-4xl mx-auto pb-10">
+                                <header class="flex justify-between items-center">
+                                    <h2 class="text-2xl font-bold text-white">Crear Nuevo Ejercicio</h2>
+                                    <button onclick="window.App.toggleExerciseForm()" class="text-slate-400 hover:text-white px-4 py-2 bg-slate-800 rounded-xl">Cancelar</button>
+                                </header>
+                                <form onsubmit="window.App.saveExercise(event)" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div class="space-y-4">
+                                            <div><label class="text-sm text-slate-400 mb-1 block">Nombre del Ejercicio</label><input type="text" id="ex-name" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white"></div>
+                                            <div><label class="text-sm text-slate-400 mb-1 block">URL de Imagen/GIF (Opcional)</label><input type="url" id="ex-image" placeholder="https://..." class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white"></div>
+                                            <div><label class="text-sm text-slate-400 mb-1 block">Preparación</label><textarea id="ex-prep" rows="2" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white"></textarea></div>
+                                            <div><label class="text-sm text-slate-400 mb-1 block">Ejecución</label><textarea id="ex-exec" rows="3" required class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white"></textarea></div>
+                                            <div><label class="text-sm text-slate-400 mb-1 block">Detalles/Tips</label><textarea id="ex-details" rows="2" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white"></textarea></div>
+                                        </div>
+                                        <div class="space-y-6">
+                                            <div class="bg-slate-950/50 p-4 rounded-xl border border-slate-800">
+                                                <label class="text-sm font-bold text-indigo-400 mb-3 block"><i data-lucide="target" class="inline w-4 h-4 mr-1"></i> Músculos Primarios</label>
+                                                <div class="grid grid-cols-2 gap-2">${createCheckboxes('primaryMuscle')}</div>
+                                            </div>
+                                            <div class="bg-slate-950/50 p-4 rounded-xl border border-slate-800">
+                                                <label class="text-sm font-bold text-slate-400 mb-3 block"><i data-lucide="activity" class="inline w-4 h-4 mr-1"></i> Músculos Secundarios</label>
+                                                <div class="grid grid-cols-2 gap-2">${createCheckboxes('secondaryMuscle')}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button type="submit" class="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/20">Guardar Ejercicio</button>
+                                </form>
+                            </div>
+                        `;
+                    }
+
+                    const exercisesList = AppState.adminData.exercises.map(ex => `
+                        <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center gap-4 hover:border-indigo-500/50 transition-colors">
+                            <div class="w-16 h-16 bg-slate-800 rounded-lg overflow-hidden flex-shrink-0 flex items-center justify-center">
+                                ${ex.image ? `<img src="${ex.image}" alt="${ex.name}" class="w-full h-full object-cover">` : `<i data-lucide="image" class="text-slate-600"></i>`}
+                            </div>
+                            <div class="flex-1">
+                                <h3 class="font-bold text-white text-lg">${ex.name}</h3>
+                                <div class="flex gap-2 mt-1 flex-wrap">
+                                    ${ex.primaryMuscles.map(m => `<span class="text-[10px] px-2 py-1 bg-indigo-500/10 text-indigo-400 rounded-md border border-indigo-500/20 uppercase font-bold">${m}</span>`).join('')}
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="space-y-6 animate-fade-in pb-10">
+                            <header class="flex justify-between items-center mb-8">
+                                <div><h1 class="text-3xl font-black text-white">Biblioteca de Ejercicios</h1><p class="text-slate-400">Total registrados: ${AppState.adminData.exercises.length}</p></div>
+                                <button onclick="window.App.toggleExerciseForm()" class="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/20"><i data-lucide="plus" class="w-5 h-5"></i> Nuevo</button>
+                            </header>
+                            ${AppState.adminData.exercises.length > 0 ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${exercisesList}</div>` : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="dumbbell" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no hay ejercicios creados.</p></div>`}
+                        </div>
+                    `;
+                },
+
+                trainerPanel() {
+                    return `<div class="space-y-6 animate-fade-in"><header><h2 class="text-2xl font-bold text-white">Mis Alumnos</h2></header><div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center py-12"><p class="text-slate-400">Módulo en construcción: Aquí verás a los usuarios que te seleccionaron.</p></div></div>`;
+                },
+
+                profile() { 
+                    return `
+                        <div class="max-w-2xl mx-auto animate-slide-up">
+                            <header class="mb-8">
+                                <h2 class="text-3xl font-black text-white">Mi Perfil</h2>
+                                <p class="text-slate-400">Mantén tus datos actualizados para mejorar tus rutinas.</p>
+                            </header>
+                            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div>
+                                        <label class="block text-sm text-slate-400 mb-2">Peso (kg)</label>
+                                        <input type="number" id="profile-weight" value="${AppState.profile.weight || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm text-slate-400 mb-2">Altura (cm)</label>
+                                        <input type="number" id="profile-height" value="${AppState.profile.height || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none">
+                                    </div>
+                                </div>
+                                <button onclick="window.App.saveProfile()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-indigo-600/20">Guardar Cambios</button>
+                            </div>
+                        </div>
+                    `;
+                },
+                
+                routines() {
+                    if (AppState.showRoutineForm) {
+                        const exOptions = AppState.adminData.exercises.map(ex => `<option value="${ex.id}">${ex.name}</option>`).join('');
+                        const selectedExercisesHtml = AppState.routineDraft.exercises.map((ex, index) => `
+                            <div class="bg-slate-800 p-4 rounded-xl flex items-center justify-between border border-slate-700 mb-3 animate-fade-in">
+                                <div class="font-bold text-white flex-1">${ex.name}</div>
+                                <div class="flex items-center gap-4">
+                                    <div><label class="text-xs text-slate-400 block text-center mb-1">Series</label><input type="number" id="sets-${index}" value="${ex.sets}" min="1" class="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-white text-center focus:outline-none focus:border-indigo-500"></div>
+                                    <div><label class="text-xs text-slate-400 block text-center mb-1">Reps</label><input type="number" id="reps-${index}" value="${ex.reps}" min="1" class="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-white text-center focus:outline-none focus:border-indigo-500"></div>
+                                    <button type="button" onclick="window.App.removeExerciseFromRoutine(${index})" class="mt-5 p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                </div>
+                            </div>
+                        `).join('');
+
+                        return `
+                            <div class="space-y-6 animate-zoom-in max-w-3xl mx-auto pb-10">
+                                <header class="flex justify-between items-center">
+                                    <h2 class="text-2xl font-bold text-white">Construir Nueva Rutina</h2>
+                                    <button onclick="window.App.toggleRoutineForm()" class="text-slate-400 hover:text-white px-4 py-2 bg-slate-800 rounded-xl">Cancelar</button>
+                                </header>
+                                <form onsubmit="window.App.saveRoutine(event)" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
+                                    <div><label class="text-sm text-slate-400 mb-2 block">Nombre de la Rutina</label><input type="text" id="routine-name" value="${AppState.routineDraft.name}" required placeholder="Ej: Pecho y Tríceps - Día 1" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"></div>
+                                    <div class="border-t border-slate-800 pt-6">
+                                        <h3 class="text-lg font-bold text-white mb-4">Ejercicios de la Rutina</h3>
+                                        <div class="flex flex-col md:flex-row gap-3 mb-6">
+                                            <select id="routine-exercise-select" class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                                <option value="">-- Selecciona un ejercicio de la biblioteca --</option>
+                                                ${exOptions}
+                                            </select>
+                                            <button type="button" onclick="window.App.addExerciseToRoutine()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl whitespace-nowrap transition-colors">Añadir Ejercicio</button>
+                                        </div>
+                                        <div id="routine-exercises-list" class="space-y-2">
+                                            ${selectedExercisesHtml || '<div class="text-center p-8 border-2 border-dashed border-slate-800 rounded-xl"><p class="text-slate-500">No has añadido ejercicios aún.</p></div>'}
+                                        </div>
+                                    </div>
+                                    <button type="submit" class="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg shadow-emerald-600/20 transition-colors mt-4">Guardar Rutina</button>
+                                </form>
+                            </div>
+                        `;
+                    }
+
+                    const routinesList = AppState.routines.map((r, i) => `
+                        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 hover:border-indigo-500/50 transition-colors shadow-lg">
+                            <div class="flex justify-between items-start mb-4">
+                                <div><h3 class="font-black text-xl text-white">${r.name}</h3><p class="text-sm text-indigo-400 font-bold mt-1">${r.exercises.length} Ejercicios</p></div>
+                                <button onclick="window.App.deleteRoutine(${i})" class="text-slate-500 hover:text-red-400 p-2 hover:bg-red-500/10 rounded-lg transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                            </div>
+                            <div class="space-y-2 mt-4 bg-slate-950/50 p-4 rounded-xl border border-slate-800/50">
+                                ${r.exercises.map((ex, exIndex) => `
+                                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center text-sm border-b border-slate-800/50 py-3 last:border-0 last:pb-0">
+                                        <span class="text-slate-300 font-medium mb-2 sm:mb-0">${ex.name}</span>
+                                        <div class="flex items-center justify-between w-full sm:w-auto gap-4">
+                                            <span class="text-indigo-400 font-bold px-2 py-1 bg-indigo-500/10 rounded-md whitespace-nowrap">${ex.sets} x ${ex.reps}</span>
+                                            <div class="flex items-center gap-2">
+                                                <input type="number" placeholder="0" value="${ex.weight || ''}" onchange="window.App.updateWeight(${i}, ${exIndex}, this.value)" class="w-16 bg-slate-900 border border-slate-700 rounded-md px-2 py-1 text-white text-center focus:outline-none focus:border-indigo-500 transition-colors">
+                                                <span class="text-slate-500 text-xs font-bold">lbs</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="space-y-6 animate-fade-in pb-10">
+                            <header class="flex justify-between items-center mb-8">
+                                <div><h1 class="text-3xl font-black text-white">Mis Rutinas</h1><p class="text-slate-400">Organiza tu entrenamiento</p></div>
+                                <button onclick="window.App.toggleRoutineForm()" class="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/20 transition-colors"><i data-lucide="plus" class="w-5 h-5"></i> Crear</button>
+                            </header>
+                            ${AppState.routines.length > 0 ? `<div class="grid grid-cols-1 md:grid-cols-2 gap-6">${routinesList}</div>` : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="calendar" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">No tienes rutinas asignadas.</p></div>`}
+                        </div>
+                    `;
+                }
+            }
+        };
+
+        window.App = App;
+        document.addEventListener('DOMContentLoaded', () => App.init());
+    </script>
+</body>
+</html>
