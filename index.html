@@ -43,7 +43,6 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
-        // Añadimos deleteDoc a las importaciones
         import { getFirestore, doc, setDoc, getDoc, collection, query, where, getDocs, updateDoc, addDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
         const firebaseConfig = {
@@ -69,15 +68,15 @@
             workoutHistory: [],
             showRoutineForm: false, 
             routineDraft: { name: '', exercises: [] },
-            plans: [], // <-- NUEVO: Planes dinámicos para usuarios/entrenadores
+            plans: [], 
             adminData: { 
                 pendingUsers: [],
                 activeUsers: [],
                 stats: { athletes: 0, trainers: 0, activePlans: 0, exercises: 0 },
                 exercises: [], 
                 showExerciseForm: false,
-                plans: [], // <-- NUEVO: Planes para el panel de admin
-                showPlanForm: false // <-- NUEVO: Control del formulario de planes
+                plans: [], 
+                showPlanForm: false 
             },
             trainersList: []
         };
@@ -142,7 +141,6 @@
                 AppState.plans = [];
             },
 
-            // --- AUTENTICACIÓN ---
             toggleAuthMode() { AppState.authMode = AppState.authMode === 'login' ? 'register' : 'login'; this.render(); },
             
             async handleAuthForm(event) {
@@ -164,14 +162,12 @@
             },
             async logout() { await signOut(auth); },
 
-            // --- NAVEGACIÓN Y LÓGICA DE ROLES ---
             changeView(view) {
                 AppState.currentView = view;
                 if (view === 'adminPanel') this.loadUsersAdmin();
                 if (view === 'dashboard' && AppState.user.role === 'admin') this.loadAdminStats();
                 if (view === 'dashboard' && AppState.user.role === 'user' && !AppState.user.trainerId) this.loadTrainers();
                 if (view === 'exercises' || view === 'routines') this.loadExercises();
-                // NUEVO: Cargar los planes cuando se entra a la vista
                 if (view === 'plans') {
                     if (AppState.user.role === 'admin') this.loadPlansAdmin();
                     else this.loadUserPlans();
@@ -179,7 +175,6 @@
                 this.render();
             },
 
-            // --- LÓGICA DE PERFIL Y PAGOS ---
             async saveProfile() {
                 const weight = document.getElementById('profile-weight').value;
                 const height = document.getElementById('profile-height').value;
@@ -190,9 +185,7 @@
                 try {
                     await FirebaseDB.saveAllData();
                     alert("¡Perfil actualizado correctamente! 💪");
-                } catch (error) {
-                    alert("Error al guardar los datos.");
-                }
+                } catch (error) { alert("Error al guardar los datos."); }
             },
 
             requestSubscription(planId, planName) {
@@ -206,7 +199,6 @@
                 this.changeView('dashboard');
             },
 
-            // --- GESTIÓN DE PLANES DINÁMICOS ---
             async loadPlansAdmin() {
                 try {
                     const snap = await getDocs(collection(db, "plans"));
@@ -217,7 +209,6 @@
 
             async loadUserPlans() {
                 try {
-                    // Solo trae los planes que corresponden al rol del usuario (user o trainer)
                     const q = query(collection(db, "plans"), where("targetRole", "==", AppState.user.role));
                     const snap = await getDocs(q);
                     AppState.plans = snap.docs.map(d => ({id: d.id, ...d.data()}));
@@ -230,12 +221,14 @@
                 this.render();
             },
 
+            // --- ACTUALIZADO: Guardar Plan con Duración ---
             async savePlan(event) {
                 event.preventDefault();
                 const data = {
                     name: document.getElementById('plan-name').value,
                     price: document.getElementById('plan-price').value,
                     desc: document.getElementById('plan-desc').value,
+                    durationDays: parseInt(document.getElementById('plan-duration').value), // NUEVO: Días
                     targetRole: document.getElementById('plan-role').value,
                     createdAt: new Date().toISOString()
                 };
@@ -245,9 +238,7 @@
                     alert("¡Plan creado exitosamente! 🚀");
                     this.togglePlanForm();
                     this.loadPlansAdmin();
-                } catch(e) {
-                    alert("Error al guardar el plan.");
-                }
+                } catch(e) { alert("Error al guardar el plan."); }
             },
 
             async deletePlan(planId) {
@@ -259,7 +250,6 @@
                 }
             },
 
-            // --- LÓGICA ADMIN Y ENTRENADORES ---
             async loadAdminStats() {
                 try {
                     const snap = await getDocs(collection(db, "users"));
@@ -286,15 +276,32 @@
                 } catch(e) { console.error(e); }
             },
 
-            async approveUser(userId) {
+            // --- ACTUALIZADO: Aprobar Usuario con Vencimiento ---
+            async approveUser(userId, planId) {
                 try {
-                    await updateDoc(doc(db, "users", userId), { "subscription.status": "active" });
-                    alert("✅ Usuario aprobado con éxito.");
+                    let expiresAt = null;
+                    
+                    // Si tenemos un planId, buscamos sus días de duración para calcular la fecha
+                    if (planId) {
+                        const planSnap = await getDoc(doc(db, "plans", planId));
+                        if (planSnap.exists()) {
+                            const durationDays = planSnap.data().durationDays || 30; // Por defecto 30 días
+                            const expDate = new Date();
+                            expDate.setDate(expDate.getDate() + durationDays);
+                            expiresAt = expDate.toISOString();
+                        }
+                    }
+
+                    await updateDoc(doc(db, "users", userId), { 
+                        "subscription.status": "active",
+                        "subscription.expiresAt": expiresAt
+                    });
+                    
+                    alert("✅ Usuario aprobado. Fecha de vencimiento configurada.");
                     this.loadUsersAdmin(); 
                 } catch(e) { console.error(e); alert("Error al aprobar."); }
             },
 
-            // --- GESTIÓN DE EJERCICIOS ---
             async loadExercises() {
                 try {
                     const snap = await getDocs(collection(db, "exercises"));
@@ -347,7 +354,6 @@
                 this.render();
             },
 
-            // --- GESTIÓN DE RUTINAS ---
             toggleRoutineForm() {
                 AppState.showRoutineForm = !AppState.showRoutineForm;
                 AppState.routineDraft = { name: '', exercises: [] };
@@ -428,7 +434,6 @@
                 } catch(e) { console.error("Error guardando el peso:", e); }
             },
 
-            // --- RENDERIZADO Y VISTAS ---
             updateStatusIndicator() {
                 const dot = document.getElementById('status-dot'); const text = document.getElementById('status-text');
                 if(!dot || !text) return;
@@ -474,7 +479,7 @@
                         { id: 'adminPanel', icon: 'shield-check', label: 'Aprobaciones' },
                         { id: 'exercises', icon: 'dumbbell', label: 'Ejercicios' },
                         { id: 'routines', icon: 'calendar', label: 'Rutinas' },
-                        { id: 'plans', icon: 'credit-card', label: 'Planes' } // <-- Añadimos Planes al Admin
+                        { id: 'plans', icon: 'credit-card', label: 'Planes' }
                     ];
                 } else if (AppState.user.role === 'trainer') {
                     navLinks = [
@@ -577,14 +582,22 @@
                             </div>
                         `;
                     }
+                    
+                    const formatExp = (dateStr) => {
+                        if(!dateStr) return 'Fecha no definida';
+                        return new Date(dateStr).toLocaleDateString('es-ES', { year: 'numeric', month: 'long', day: 'numeric' });
+                    };
+
                     if (AppState.user.role === 'trainer') {
                         return `
                             <div class="space-y-6 animate-fade-in text-center py-12">
                                 <i data-lucide="users" class="w-20 h-20 text-blue-500 mx-auto mb-4"></i>
                                 <h1 class="text-3xl font-black text-white">Hola, Entrenador ${AppState.user.name}</h1>
                                 ${AppState.subscription.status === 'active' 
-                                    ? `<p class="text-slate-400">Tu panel está activo. Revisa a tus alumnos.</p><button onclick="window.App.changeView('trainerPanel')" class="mt-4 px-6 py-2 bg-blue-600 rounded-xl text-white font-bold">Mis Alumnos</button>` 
-                                    : `<p class="text-red-400 font-bold mt-2">Activa tu plan para acceder a tu panel.</p><button onclick="window.App.changeView('plans')" class="mt-4 px-6 py-2 bg-indigo-600 rounded-xl text-white font-bold">Ver Planes</button>`}
+                                    ? `<p class="text-slate-400 mb-4">Tu panel está activo. Válido hasta: <span class="text-indigo-400 font-bold">${formatExp(AppState.subscription.expiresAt)}</span></p>
+                                       <button onclick="window.App.changeView('trainerPanel')" class="mt-4 px-6 py-2 bg-blue-600 rounded-xl text-white font-bold">Mis Alumnos</button>` 
+                                    : `<p class="text-red-400 font-bold mt-2">Activa tu plan para acceder a tu panel.</p>
+                                       <button onclick="window.App.changeView('plans')" class="mt-4 px-6 py-2 bg-indigo-600 rounded-xl text-white font-bold">Ver Planes</button>`}
                             </div>
                         `;
                     }
@@ -605,7 +618,7 @@
                             <div class="space-y-6 animate-fade-in text-center py-12 max-w-2xl mx-auto">
                                 <i data-lucide="star" class="w-16 h-16 text-indigo-500 mx-auto mb-4"></i>
                                 <h1 class="text-3xl font-black text-white">¡Plan Activado! 🎉</h1>
-                                <p class="text-slate-400 mb-8">Selecciona a tu entrenador personal para comenzar.</p>
+                                <p class="text-slate-400 mb-8">Válido hasta: <span class="text-indigo-400 font-bold">${formatExp(AppState.subscription.expiresAt)}</span>.<br/>Selecciona a tu entrenador personal para comenzar.</p>
                                 <div class="space-y-3 text-left">
                                     ${trainersHtml || '<p class="text-slate-500 text-center">No hay entrenadores disponibles en este momento.</p>'}
                                 </div>
@@ -616,8 +629,8 @@
                     const nextRoutine = AppState.routines[0];
                     return `
                         <div class="space-y-6 animate-fade-in">
-                            <header><h1 class="text-3xl font-black text-white">¡Hola, ${AppState.user.name}! 👋</h1><p class="text-slate-400">Entrenador asignado. Listo para romper tus límites.</p></header>
-                            <div class="bg-gradient-to-br from-indigo-900 to-slate-900 border border-indigo-800 rounded-2xl p-6 shadow-xl">
+                            <header><h1 class="text-3xl font-black text-white">¡Hola, ${AppState.user.name}! 👋</h1><p class="text-slate-400">Válido hasta: <span class="text-indigo-400 font-bold">${formatExp(AppState.subscription.expiresAt)}</span></p></header>
+                            <div class="bg-gradient-to-br from-indigo-900 to-slate-900 border border-indigo-800 rounded-2xl p-6 shadow-xl mt-4">
                                 <p class="text-indigo-300 text-sm font-bold uppercase tracking-wider">Próxima Rutina</p>
                                 <h3 class="text-2xl font-bold text-white mt-1">${nextRoutine ? nextRoutine.name : 'Tu entrenador aún no ha asignado rutinas.'}</h3>
                             </div>
@@ -625,9 +638,8 @@
                     `;
                 },
 
-                // --- VISTA DINÁMICA DE PLANES ---
+                // --- ACTUALIZADO: Formulario de Planes para pedir los días ---
                 plans() {
-                    // VISTA ADMIN: Crear y listar todos los planes
                     if (AppState.user.role === 'admin') {
                         if (AppState.adminData.showPlanForm) {
                             return `
@@ -644,6 +656,10 @@
                                         <div>
                                             <label class="text-sm text-slate-400 mb-1 block">Precio (Incluye moneda)</label>
                                             <input type="text" id="plan-price" required placeholder="Ej: RD$ 1,500" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                        </div>
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Duración (en Días)</label>
+                                            <input type="number" id="plan-duration" required placeholder="Ej: 30" min="1" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
                                         </div>
                                         <div>
                                             <label class="text-sm text-slate-400 mb-1 block">Descripción / Beneficios</label>
@@ -666,7 +682,7 @@
                             <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 flex justify-between items-center hover:border-indigo-500/50 transition-colors">
                                 <div>
                                     <h3 class="font-bold text-white text-lg">${p.name} <span class="text-[10px] px-2 py-1 ml-2 ${p.targetRole === 'trainer' ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'} rounded-md border uppercase">${p.targetRole}</span></h3>
-                                    <p class="text-indigo-400 font-bold mt-1">${p.price}</p>
+                                    <p class="text-indigo-400 font-bold mt-1">${p.price} <span class="text-slate-500 text-sm font-normal">(${p.durationDays || 30} días)</span></p>
                                     <p class="text-slate-400 text-sm mt-1">${p.desc}</p>
                                 </div>
                                 <button onclick="window.App.deletePlan('${p.id}')" class="text-slate-500 hover:text-red-400 p-3 hover:bg-red-500/10 rounded-xl transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
@@ -684,12 +700,12 @@
                         `;
                     }
 
-                    // VISTA ATLETAS / ENTRENADORES: Mostrar los planes dinámicos correspondientes a su rol
                     const plansHtml = AppState.plans.map(plan => `
                         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between hover:border-indigo-500/30 transition-colors">
                             <div>
                                 <h3 class="text-xl font-black text-white">${plan.name}</h3>
                                 <p class="text-3xl font-bold text-indigo-400 mt-2">${plan.price}</p>
+                                <p class="text-slate-500 text-sm mt-1">Duración: ${plan.durationDays || 30} días</p>
                                 <p class="text-slate-400 mt-4 text-sm leading-relaxed">${plan.desc}</p>
                             </div>
                             <button onclick="window.App.requestSubscription('${plan.id}', '${plan.name}')" class="mt-8 w-full px-4 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-2"><i data-lucide="message-circle" class="w-5 h-5"></i> Enviar Comprobante</button>
@@ -704,22 +720,29 @@
                     `;
                 },
 
+                // --- ACTUALIZADO: Panel de Aprobaciones pasa el ID del plan ---
                 adminPanel() {
-                    const generateUserList = (users, isPending) => users.map(u => `
+                    const generateUserList = (users, isPending) => users.map(u => {
+                        const expText = u.subscription?.expiresAt ? new Date(u.subscription.expiresAt).toLocaleDateString() : 'Sin fecha';
+                        return `
                         <div class="flex items-center justify-between border-b border-slate-800 pb-4 mb-4 last:border-0 last:pb-0 last:mb-0">
                             <div class="flex items-center gap-4">
                                 <div class="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center"><i data-lucide="user" class="text-slate-400"></i></div>
                                 <div>
                                     <p class="font-bold text-white">${u.user.name || 'Sin Nombre'} <span class="text-xs px-2 py-1 bg-slate-800 rounded-lg text-slate-400 ml-2">${u.user.role}</span></p>
-                                    <p class="text-xs ${isPending ? 'text-amber-400' : 'text-emerald-400'}">Plan ID: ${u.subscription?.plan || 'Ninguno'}</p>
+                                    ${isPending 
+                                        ? `<p class="text-xs text-amber-400">Plan ID solicitado: ${u.subscription?.plan || 'Ninguno'}</p>`
+                                        : `<p class="text-xs text-emerald-400">Vence: ${expText}</p>`
+                                    }
                                 </div>
                             </div>
                             ${isPending 
-                                ? `<button onclick="window.App.approveUser('${u.id}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition-colors">Aprobar</button>`
+                                // Pasamos el ID del usuario y el ID del plan que solicitó
+                                ? `<button onclick="window.App.approveUser('${u.id}', '${u.subscription?.plan}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition-colors">Aprobar</button>`
                                 : `<span class="px-3 py-1 bg-emerald-500/10 text-emerald-500 text-xs font-bold rounded-lg border border-emerald-500/20">Activo</span>`
                             }
                         </div>
-                    `).join('');
+                    `}).join('');
 
                     return `
                         <div class="space-y-6 animate-fade-in">
