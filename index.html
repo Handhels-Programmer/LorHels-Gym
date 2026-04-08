@@ -6,6 +6,7 @@
     <title>LorHels Gym</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
@@ -67,15 +68,12 @@
             subscription: { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 }, 
             profile: { weight: 0, height: 0 },
             routines: [], 
-            workoutHistory: [], // Aquí se guardará el registro de rendimiento
+            workoutHistory: [], 
             showRoutineForm: false, 
             routineDraft: { name: '', exercises: [] },
             plans: [], 
-            
-            // --- NUEVO: Estado del Entrenamiento Activo ---
             activeWorkout: null, 
             timerInterval: null,
-
             adminData: { 
                 pendingUsers: [], activeUsers: [], stats: { athletes: 0, trainers: 0, activePlans: 0, exercises: 0 },
                 exercises: [], pendingExercises: [], showExerciseForm: false, plans: [], showPlanForm: false 
@@ -199,24 +197,59 @@
                 this.render();
             },
 
-            // --- MOTOR DE ENTRENAMIENTO (ACTIVO) ---
+            // --- LÓGICA DE GRÁFICAS ---
+            initProgressChart() {
+                const ctx = document.getElementById('progressChart');
+                if (!ctx || !AppState.workoutHistory || AppState.workoutHistory.length === 0) return;
+
+                // Destruir gráfica anterior si existe para evitar solapamientos
+                if(window.myProgressChart) window.myProgressChart.destroy();
+
+                // Ordenar por fecha del más viejo al más reciente
+                const history = [...AppState.workoutHistory].sort((a,b) => new Date(a.date) - new Date(b.date));
+                const labels = history.map(w => new Date(w.date).toLocaleDateString('es-ES', { month:'short', day:'numeric' }));
+                const dataVolume = history.map(w => w.totalVolume);
+
+                window.myProgressChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'Volumen Levantado (lbs)',
+                            data: dataVolume,
+                            borderColor: '#6366f1', // indigo-500
+                            backgroundColor: 'rgba(99, 102, 241, 0.15)',
+                            borderWidth: 3,
+                            tension: 0.4,
+                            fill: true,
+                            pointBackgroundColor: '#8b5cf6', // violet-500
+                            pointRadius: 4,
+                            pointHoverRadius: 6
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { legend: { labels: { color: '#cbd5e1' } } },
+                        scales: {
+                            y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155', drawBorder: false } },
+                            x: { ticks: { color: '#94a3b8' }, grid: { display: false, drawBorder: false } }
+                        }
+                    }
+                });
+            },
+
             startWorkout(routineIndex) {
                 const routine = AppState.routines[routineIndex];
                 if (!routine || !routine.exercises || routine.exercises.length === 0) return alert("Esta rutina no tiene ejercicios.");
 
                 AppState.activeWorkout = {
-                    routineId: routine.id,
-                    routineName: routine.name,
-                    exercises: JSON.parse(JSON.stringify(routine.exercises)), // Copia profunda
-                    currentExIndex: 0,
-                    currentSet: 1,
-                    isResting: false,
-                    restTimeRemaining: 0,
-                    startTime: new Date().toISOString(),
-                    logs: [] // Guardará: { exName, sets: [{ reps, weight, volume }] }
+                    routineId: routine.id, routineName: routine.name,
+                    exercises: JSON.parse(JSON.stringify(routine.exercises)), 
+                    currentExIndex: 0, currentSet: 1, isResting: false, restTimeRemaining: 0,
+                    startTime: new Date().toISOString(), logs: [] 
                 };
 
-                // Inicializar log para el primer ejercicio
                 AppState.activeWorkout.logs.push({
                     exerciseName: AppState.activeWorkout.exercises[0].name,
                     exerciseId: AppState.activeWorkout.exercises[0].id,
@@ -230,38 +263,25 @@
                 const aw = AppState.activeWorkout;
                 const currentEx = aw.exercises[aw.currentExIndex];
                 
-                // Obtener valores de los inputs
                 const repsInput = document.getElementById('workout-reps').value;
                 const weightInput = document.getElementById('workout-weight').value;
                 
                 const reps = parseInt(repsInput) || currentEx.reps;
                 const weight = parseFloat(weightInput) || currentEx.weight || 0;
-                const volume = reps * weight; // Lógica de Peso Levantado solicitada
+                const volume = reps * weight; 
 
-                // Guardar en el log
-                aw.logs[aw.currentExIndex].setsCompleted.push({
-                    setNumber: aw.currentSet,
-                    reps: reps,
-                    weight: weight,
-                    volume: volume
-                });
+                aw.logs[aw.currentExIndex].setsCompleted.push({ setNumber: aw.currentSet, reps: reps, weight: weight, volume: volume });
 
-                // Lógica de avance
                 if (aw.currentSet < currentEx.sets) {
                     aw.currentSet++;
-                    this.startRest(10); // 60 segundos de descanso por defecto
+                    this.startRest(60); 
                 } else {
                     if (aw.currentExIndex < aw.exercises.length - 1) {
                         aw.currentExIndex++;
                         aw.currentSet = 1;
-                        aw.logs.push({
-                            exerciseName: aw.exercises[aw.currentExIndex].name,
-                            exerciseId: aw.exercises[aw.currentExIndex].id,
-                            setsCompleted: []
-                        });
-                        this.startRest(90); // Más descanso entre diferentes ejercicios
+                        aw.logs.push({ exerciseName: aw.exercises[aw.currentExIndex].name, exerciseId: aw.exercises[aw.currentExIndex].id, setsCompleted: [] });
+                        this.startRest(90); 
                     } else {
-                        // Fin de la rutina completa
                         this.finishWorkout();
                     }
                 }
@@ -274,12 +294,10 @@
 
                 AppState.timerInterval = setInterval(() => {
                     AppState.activeWorkout.restTimeRemaining--;
-                    
                     if (AppState.activeWorkout.restTimeRemaining <= 0) {
                         this.skipRest();
                         this.playAudioBeep();
                     } else {
-                        // Actualizar solo el texto para no re-renderizar todo el DOM cada segundo
                         const timerDisplay = document.getElementById('rest-timer-display');
                         if (timerDisplay) timerDisplay.innerText = this.formatTime(AppState.activeWorkout.restTimeRemaining);
                     }
@@ -297,69 +315,44 @@
                     const ctx = new (window.AudioContext || window.webkitAudioContext)();
                     const osc = ctx.createOscillator();
                     osc.type = 'sine';
-                    osc.frequency.setValueAtTime(880, ctx.currentTime); // Tono alto
+                    osc.frequency.setValueAtTime(880, ctx.currentTime); 
                     osc.connect(ctx.destination);
                     osc.start();
-                    osc.stop(ctx.currentTime + 0.5); // Medio segundo
-                } catch(e) { console.log("Audio no soportado en este navegador."); }
+                    osc.stop(ctx.currentTime + 0.5); 
+                } catch(e) { console.log("Audio no soportado."); }
             },
 
             async finishWorkout() {
                 const aw = AppState.activeWorkout;
                 clearInterval(AppState.timerInterval);
                 
-                // Calcular totales
-                let totalVolume = 0;
-                let totalSets = 0;
-                let totalReps = 0;
-
+                let totalVolume = 0, totalSets = 0, totalReps = 0;
                 aw.logs.forEach(log => {
                     log.setsCompleted.forEach(set => {
-                        totalVolume += set.volume;
-                        totalSets += 1;
-                        totalReps += set.reps;
+                        totalVolume += set.volume; totalSets += 1; totalReps += set.reps;
                     });
                 });
 
                 const workoutRecord = {
-                    id: Date.now().toString(),
-                    routineId: aw.routineId,
-                    routineName: aw.routineName,
-                    date: new Date().toISOString(),
-                    durationMinutes: Math.round((new Date() - new Date(aw.startTime)) / 60000),
-                    totalVolume: totalVolume,
-                    totalSets: totalSets,
-                    totalReps: totalReps,
-                    logs: aw.logs
+                    id: Date.now().toString(), routineId: aw.routineId, routineName: aw.routineName,
+                    date: new Date().toISOString(), durationMinutes: Math.round((new Date() - new Date(aw.startTime)) / 60000),
+                    totalVolume: totalVolume, totalSets: totalSets, totalReps: totalReps, logs: aw.logs
                 };
 
-                // Guardar en el historial global
                 if (!AppState.workoutHistory) AppState.workoutHistory = [];
                 AppState.workoutHistory.push(workoutRecord);
 
                 try {
                     await FirebaseDB.saveAllData();
                     alert(`¡Entrenamiento completado! 🔥\n\nResumen:\nSeries: ${totalSets}\nVolumen Total: ${totalVolume} lbs levantadas.`);
-                } catch(e) {
-                    alert("Error guardando el historial.");
-                }
+                } catch(e) { alert("Error guardando el historial."); }
 
                 AppState.activeWorkout = null;
-                this.render();
+                this.changeView('progress'); // Redirige al progreso al terminar
             },
 
-            cancelWorkout() {
-                clearInterval(AppState.timerInterval);
-                AppState.activeWorkout = null;
-                this.render();
-            },
-
-            formatTime(seconds) {
-                const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-                const s = (seconds % 60).toString().padStart(2, '0');
-                return `${m}:${s}`;
-            },
-            // --- FIN MOTOR ENTRENAMIENTO ---
+            cancelWorkout() { clearInterval(AppState.timerInterval); AppState.activeWorkout = null; this.render(); },
+            formatTime(seconds) { const m = Math.floor(seconds / 60).toString().padStart(2, '0'); const s = (seconds % 60).toString().padStart(2, '0'); return `${m}:${s}`; },
 
             async saveProfile() {
                 const weight = document.getElementById('profile-weight').value;
@@ -403,26 +396,18 @@
             async savePlan(event) {
                 event.preventDefault();
                 const data = {
-                    name: document.getElementById('plan-name').value,
-                    price: document.getElementById('plan-price').value,
-                    desc: document.getElementById('plan-desc').value,
-                    durationDays: parseInt(document.getElementById('plan-duration').value),
-                    maxClients: parseInt(document.getElementById('plan-max-clients').value || 0), 
-                    targetRole: document.getElementById('plan-role').value,
+                    name: document.getElementById('plan-name').value, price: document.getElementById('plan-price').value,
+                    desc: document.getElementById('plan-desc').value, durationDays: parseInt(document.getElementById('plan-duration').value),
+                    maxClients: parseInt(document.getElementById('plan-max-clients').value || 0), targetRole: document.getElementById('plan-role').value,
                     createdAt: new Date().toISOString()
                 };
-                try {
-                    await addDoc(collection(db, "plans"), data);
-                    alert("¡Plan creado exitosamente! 🚀");
-                    this.togglePlanForm();
-                    this.loadPlansAdmin();
-                } catch(e) { alert("Error al guardar el plan."); }
+                try { await addDoc(collection(db, "plans"), data); alert("¡Plan creado exitosamente! 🚀"); this.togglePlanForm(); this.loadPlansAdmin(); } 
+                catch(e) { alert("Error al guardar el plan."); }
             },
 
             async deletePlan(planId) {
                 if(confirm("¿Estás seguro de eliminar este plan?")) {
-                    try { await deleteDoc(doc(db, "plans", planId)); this.loadPlansAdmin(); } 
-                    catch(e) { console.error(e); }
+                    try { await deleteDoc(doc(db, "plans", planId)); this.loadPlansAdmin(); } catch(e) { console.error(e); }
                 }
             },
 
@@ -459,22 +444,17 @@
 
             async approveUser(userId, planId) {
                 try {
-                    let expiresAt = null;
-                    let maxClients = 0;
+                    let expiresAt = null; let maxClients = 0;
                     if (planId) {
                         const planSnap = await getDoc(doc(db, "plans", planId));
                         if (planSnap.exists()) {
                             const planData = planSnap.data();
                             const durationDays = planData.durationDays || 30;
-                            const expDate = new Date();
-                            expDate.setDate(expDate.getDate() + durationDays);
-                            expiresAt = expDate.toISOString();
-                            maxClients = planData.maxClients || 0; 
+                            const expDate = new Date(); expDate.setDate(expDate.getDate() + durationDays);
+                            expiresAt = expDate.toISOString(); maxClients = planData.maxClients || 0; 
                         }
                     }
-                    await updateDoc(doc(db, "users", userId), { 
-                        "subscription.status": "active", "subscription.expiresAt": expiresAt, "subscription.maxClients": maxClients 
-                    });
+                    await updateDoc(doc(db, "users", userId), { "subscription.status": "active", "subscription.expiresAt": expiresAt, "subscription.maxClients": maxClients });
                     alert("✅ Usuario aprobado. Fecha de vencimiento y límites configurados.");
                     this.loadUsersAdmin(); 
                 } catch(e) { console.error(e); alert("Error al aprobar."); }
@@ -568,10 +548,7 @@
 
             async deleteExercise(exId, isRejection = false) {
                 const msg = isRejection ? "¿Estás seguro de rechazar y borrar este ejercicio propuesto?" : "¿Estás seguro de eliminar este ejercicio?";
-                if(confirm(msg)) {
-                    try { await deleteDoc(doc(db, "exercises", exId)); this.loadExercises(); } 
-                    catch(e) { console.error(e); }
-                }
+                if(confirm(msg)) { try { await deleteDoc(doc(db, "exercises", exId)); this.loadExercises(); } catch(e) { console.error(e); } }
             },
 
             async loadTrainers() {
@@ -667,6 +644,10 @@
                     case 'adminPanel': main.innerHTML = this.views.adminPanel(); break;
                     case 'trainerPanel': main.innerHTML = this.views.trainerPanel(); break;
                     case 'exercises': main.innerHTML = this.views.exercises(); break; 
+                    case 'progress': // NUEVO
+                        main.innerHTML = this.views.progress(); 
+                        setTimeout(() => this.initProgressChart(), 50); // Generar gráfica después de renderizar HTML
+                        break; 
                 }
                 lucide.createIcons();
             },
@@ -687,6 +668,7 @@
                         { id: 'trainerPanel', icon: 'users', label: 'Mis Alumnos' },
                         { id: 'exercises', icon: 'dumbbell', label: 'Ejercicios' },
                         { id: 'plans', icon: 'credit-card', label: 'Planes' },
+                        { id: 'progress', icon: 'trending-up', label: 'Mi Progreso' }, // NUEVO
                         { id: 'profile', icon: 'user', label: 'Perfil' }
                     ];
                 } else {
@@ -694,6 +676,7 @@
                         { id: 'dashboard', icon: 'activity', label: 'Inicio' },
                         { id: 'routines', icon: 'calendar', label: 'Rutinas' },
                         { id: 'plans', icon: 'credit-card', label: 'Planes' },
+                        { id: 'progress', icon: 'trending-up', label: 'Progreso' }, // NUEVO
                         { id: 'profile', icon: 'user', label: 'Perfil' },
                     ];
                 }
@@ -834,6 +817,87 @@
                             <div class="bg-gradient-to-br from-indigo-900 to-slate-900 border border-indigo-800 rounded-2xl p-6 shadow-xl mt-4">
                                 <p class="text-indigo-300 text-sm font-bold uppercase tracking-wider">Próxima Rutina</p>
                                 <h3 class="text-2xl font-bold text-white mt-1">${nextRoutine ? nextRoutine.name : 'Tu entrenador aún no ha asignado rutinas.'}</h3>
+                                ${nextRoutine ? `<button onclick="window.App.startWorkout(0)" class="mt-4 px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition-colors shadow-lg"><i data-lucide="play" class="inline w-4 h-4 mr-1"></i> Iniciar Ahora</button>` : ''}
+                            </div>
+                        </div>
+                    `;
+                },
+
+                // --- NUEVA VISTA DE PROGRESO ---
+                progress() {
+                    const history = AppState.workoutHistory || [];
+
+                    if (history.length === 0) {
+                        return `
+                            <div class="space-y-6 animate-fade-in pb-10 max-w-5xl mx-auto">
+                                <header class="mb-8">
+                                    <h1 class="text-3xl font-black text-white">Mi Evolución</h1>
+                                    <p class="text-slate-400">Analiza tu rendimiento</p>
+                                </header>
+                                <div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl">
+                                    <i data-lucide="trending-up" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i>
+                                    <h3 class="text-xl font-bold text-white mb-2">Aún no hay datos</h3>
+                                    <p class="text-slate-400">Completa tu primer entrenamiento para ver tus gráficas de progreso.</p>
+                                    <button onclick="window.App.changeView('routines')" class="mt-6 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl transition-colors">
+                                        Ir a Entrenar
+                                    </button>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    const totalWorkouts = history.length;
+                    const totalVolume = history.reduce((sum, w) => sum + (w.totalVolume || 0), 0);
+                    const totalMinutes = history.reduce((sum, w) => sum + (w.durationMinutes || 0), 0);
+
+                    // Revertimos la copia para que los más nuevos salgan arriba en la lista
+                    const recentHistoryHtml = [...history].reverse().slice(0, 5).map(w => `
+                        <div class="flex justify-between items-center p-4 bg-slate-800/50 rounded-xl border border-slate-700 mb-3">
+                            <div>
+                                <p class="font-bold text-white">${w.routineName}</p>
+                                <p class="text-xs text-slate-400">${new Date(w.date).toLocaleDateString()} • ${w.durationMinutes} min</p>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-indigo-400 font-black">${w.totalVolume} lbs</p>
+                                <p class="text-xs text-slate-400">${w.totalSets} series | ${w.totalReps} reps</p>
+                            </div>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="space-y-6 animate-fade-in pb-10 max-w-5xl mx-auto">
+                            <header class="mb-8">
+                                <h1 class="text-3xl font-black text-white">Mi Evolución</h1>
+                                <p class="text-slate-400">Rastrea tu progreso a lo largo del tiempo</p>
+                            </header>
+
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col justify-center">
+                                    <p class="text-slate-400 text-sm font-medium mb-1">Entrenamientos</p>
+                                    <p class="text-4xl font-black text-white">${totalWorkouts}</p>
+                                </div>
+                                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col justify-center">
+                                    <p class="text-slate-400 text-sm font-medium mb-1">Volumen Total</p>
+                                    <p class="text-4xl font-black text-indigo-400">${totalVolume} <span class="text-lg text-slate-500">lbs</span></p>
+                                </div>
+                                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col justify-center">
+                                    <p class="text-slate-400 text-sm font-medium mb-1">Tiempo Entrenando</p>
+                                    <p class="text-4xl font-black text-emerald-400">${totalMinutes} <span class="text-lg text-slate-500">min</span></p>
+                                </div>
+                            </div>
+
+                            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl mb-6">
+                                <h3 class="text-lg font-bold text-white mb-6">Volumen de Entrenamiento por Sesión</h3>
+                                <div class="relative h-64 w-full">
+                                    <canvas id="progressChart"></canvas>
+                                </div>
+                            </div>
+
+                            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                                <h3 class="text-lg font-bold text-white mb-4">Últimos Entrenamientos</h3>
+                                <div>
+                                    ${recentHistoryHtml}
+                                </div>
                             </div>
                         </div>
                     `;
@@ -1003,6 +1067,7 @@
                                     </div>
                                 </div>
                             </div>
+
                             <div class="mt-8 bg-slate-900 border border-slate-800 rounded-2xl p-6">
                                 <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="dumbbell" class="text-indigo-500"></i> Ejercicios Propuestos por Entrenadores</h3>
                                 <div class="space-y-4">
@@ -1142,6 +1207,20 @@
                     if (AppState.trainerData.view === 'detail' && AppState.trainerData.selectedClient) {
                         const client = AppState.trainerData.selectedClient;
                         const clientRoutines = client.routines || [];
+                        
+                        const history = client.workoutHistory || [];
+                        const totalVol = history.reduce((s, w) => s + (w.totalVolume || 0), 0);
+
+                        const progressHtml = history.length > 0 ? `
+                            <div class="mt-4">
+                                <p class="text-3xl font-black text-indigo-400 mb-1">${totalVol} lbs</p>
+                                <p class="text-slate-400 text-sm font-medium">Volumen Total Levantado</p>
+                                
+                                <p class="text-emerald-400 font-black text-2xl mt-6">${history.length}</p>
+                                <p class="text-slate-400 text-sm font-medium">Entrenamientos Completados</p>
+                            </div>
+                        ` : `<p class="text-slate-500 text-sm mt-4">El alumno no ha registrado entrenamientos aún.</p>`;
+
                         const routinesHtml = clientRoutines.map((r, i) => `
                             <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 mb-3">
                                 <div class="flex justify-between items-start mb-3">
@@ -1186,8 +1265,8 @@
                                     <div class="space-y-6">
                                         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-center">
                                             <i data-lucide="activity" class="w-12 h-12 text-emerald-500 mx-auto mb-3"></i>
-                                            <h4 class="font-bold text-white text-lg">Progreso</h4>
-                                            <p class="text-slate-400 text-sm mt-2">Módulo en construcción.</p>
+                                            <h4 class="font-bold text-white text-lg">Resumen de Progreso</h4>
+                                            ${progressHtml}
                                         </div>
                                     </div>
                                 </div>
@@ -1243,32 +1322,8 @@
                     `;
                 },
 
-                profile() { 
-                    return `
-                        <div class="max-w-2xl mx-auto animate-slide-up">
-                            <header class="mb-8">
-                                <h2 class="text-3xl font-black text-white">Mi Perfil</h2>
-                                <p class="text-slate-400">Mantén tus datos actualizados para mejorar tus rutinas.</p>
-                            </header>
-                            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div>
-                                        <label class="block text-sm text-slate-400 mb-2">Peso (kg)</label>
-                                        <input type="number" id="profile-weight" value="${AppState.profile.weight || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none">
-                                    </div>
-                                    <div>
-                                        <label class="block text-sm text-slate-400 mb-2">Altura (cm)</label>
-                                        <input type="number" id="profile-height" value="${AppState.profile.height || ''}" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-indigo-500 outline-none">
-                                    </div>
-                                </div>
-                                <button onclick="window.App.saveProfile()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-indigo-600/20">Guardar Cambios</button>
-                            </div>
-                        </div>
-                    `;
-                },
-                
+                // --- VISTA RUTINAS (INCLUYE ENTRENAMIENTO ACTIVO) ---
                 routines() {
-                    // --- NUEVO: VISTA DE ENTRENAMIENTO ACTIVO ---
                     if (AppState.activeWorkout) {
                         const aw = AppState.activeWorkout;
                         const currentEx = aw.exercises[aw.currentExIndex];
@@ -1280,14 +1335,10 @@
                                 <div class="max-w-xl mx-auto text-center py-20 animate-fade-in">
                                     <h2 class="text-4xl font-black text-white mb-2">¡Tiempo de Descanso! ⏱️</h2>
                                     <p class="text-slate-400 mb-12">Recupera el aliento. Siguiente: ${isLastSet && !isLastExercise ? aw.exercises[aw.currentExIndex + 1].name : currentEx.name}</p>
-                                    
                                     <div class="w-48 h-48 mx-auto bg-slate-900 border-4 border-indigo-500 rounded-full flex items-center justify-center mb-12 shadow-[0_0_50px_-12px_rgba(99,102,241,0.5)] animate-pulse-fast">
                                         <span id="rest-timer-display" class="text-5xl font-black text-white">${window.App.formatTime(aw.restTimeRemaining)}</span>
                                     </div>
-
-                                    <button onclick="window.App.skipRest()" class="px-8 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-colors">
-                                        Saltar Descanso
-                                    </button>
+                                    <button onclick="window.App.skipRest()" class="px-8 py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-xl transition-colors">Saltar Descanso</button>
                                 </div>
                             `;
                         }
@@ -1301,15 +1352,12 @@
                                     </div>
                                     <button onclick="window.App.cancelWorkout()" class="p-2 text-slate-500 hover:text-red-400 transition-colors"><i data-lucide="x" class="w-6 h-6"></i></button>
                                 </header>
-
                                 <div class="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
                                     <div class="h-48 bg-slate-800 flex items-center justify-center border-b border-slate-700">
                                         <i data-lucide="image" class="w-12 h-12 text-slate-600"></i>
                                     </div>
-                                    
                                     <div class="p-8">
                                         <h3 class="text-3xl font-black text-white text-center mb-6">${currentEx.name}</h3>
-                                        
                                         <div class="flex justify-center items-center gap-8 mb-10">
                                             <div class="text-center">
                                                 <p class="text-slate-400 text-sm font-medium mb-1">Serie Actual</p>
@@ -1321,7 +1369,6 @@
                                                 <p class="text-4xl font-black text-white">${currentEx.reps}</p>
                                             </div>
                                         </div>
-
                                         <div class="grid grid-cols-2 gap-4 mb-8">
                                             <div class="bg-slate-950 p-4 rounded-2xl border border-slate-800">
                                                 <label class="block text-center text-slate-400 text-sm font-medium mb-2">Peso (lbs)</label>
@@ -1332,7 +1379,6 @@
                                                 <input type="number" id="workout-reps" value="${currentEx.reps}" class="w-full bg-transparent text-center text-3xl font-black text-white focus:outline-none">
                                             </div>
                                         </div>
-
                                         <button onclick="window.App.finishSet()" class="w-full py-5 bg-emerald-600 hover:bg-emerald-500 text-white text-xl font-black rounded-2xl shadow-[0_0_40px_-10px_rgba(16,185,129,0.5)] transition-all transform hover:scale-[1.02]">
                                             ${isLastSet && isLastExercise ? 'Finalizar Entrenamiento 🎉' : 'Terminé la Serie'}
                                         </button>
@@ -1341,7 +1387,6 @@
                             </div>
                         `;
                     }
-                    // --- FIN VISTA ENTRENAMIENTO ---
 
                     if (AppState.showRoutineForm) {
                         const exOptions = AppState.adminData.exercises.map(ex => `<option value="${ex.id}">${ex.name}</option>`).join('');
