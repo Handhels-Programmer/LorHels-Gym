@@ -62,7 +62,7 @@
         const AppState = {
             isAuthenticated: false, authMode: 'login', currentView: 'dashboard',
             user: { id: '', name: '', role: 'user', email: '', trainerId: null },
-            subscription: { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 }, // maxClients añadido
+            subscription: { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 }, 
             profile: { weight: 0, height: 0 },
             routines: [], 
             workoutHistory: [],
@@ -74,18 +74,13 @@
                 activeUsers: [],
                 stats: { athletes: 0, trainers: 0, activePlans: 0, exercises: 0 },
                 exercises: [], 
+                pendingExercises: [], 
                 showExerciseForm: false,
                 plans: [], 
                 showPlanForm: false 
             },
             trainersList: [],
-            trainerData: { 
-                clients: [],
-                pendingClients: [], // Alumnos que han seleccionado al entrenador pero no están activos
-                stats: { totalRoutines: 0, completedRoutines: 0 },
-                selectedClient: null, // Para ver el detalle de un alumno
-                view: 'list' // 'list' o 'detail'
-            }
+            trainerData: { clients: [], pendingClients: [], view: 'list', selectedClient: null } 
         };
 
         const FirebaseDB = {
@@ -146,7 +141,7 @@
                 AppState.routines = []; AppState.workoutHistory = [];
                 AppState.routineDraft = { name: '', exercises: [] };
                 AppState.plans = [];
-                AppState.trainerData = { clients: [] };
+                AppState.trainerData = { clients: [], pendingClients: [], view: 'list', selectedClient: null };
             },
 
             toggleAuthMode() { AppState.authMode = AppState.authMode === 'login' ? 'register' : 'login'; this.render(); },
@@ -172,7 +167,10 @@
 
             changeView(view) {
                 AppState.currentView = view;
-                if (view === 'adminPanel') this.loadUsersAdmin();
+                if (view === 'adminPanel') {
+                    this.loadUsersAdmin();
+                    this.loadExercises(); 
+                }
                 if (view === 'dashboard' && AppState.user.role === 'admin') this.loadAdminStats();
                 if (view === 'dashboard' && AppState.user.role === 'user' && !AppState.user.trainerId) this.loadTrainers();
                 if (view === 'exercises' || view === 'routines') this.loadExercises();
@@ -181,7 +179,7 @@
                     else this.loadUserPlans();
                 }
                 if (view === 'trainerPanel' && AppState.user.role === 'trainer') {
-                    AppState.trainerData.view = 'list'; // Reiniciar a la lista
+                    AppState.trainerData.view = 'list';
                     this.loadTrainerClients();
                 }
                 this.render();
@@ -233,7 +231,6 @@
                 this.render();
             },
 
-            // --- ACTUALIZADO: Guardar Plan con Límite de Alumnos ---
             async savePlan(event) {
                 event.preventDefault();
                 const data = {
@@ -241,7 +238,7 @@
                     price: document.getElementById('plan-price').value,
                     desc: document.getElementById('plan-desc').value,
                     durationDays: parseInt(document.getElementById('plan-duration').value),
-                    maxClients: parseInt(document.getElementById('plan-max-clients').value || 0), // NUEVO: Max clientes
+                    maxClients: parseInt(document.getElementById('plan-max-clients').value || 0), 
                     targetRole: document.getElementById('plan-role').value,
                     createdAt: new Date().toISOString()
                 };
@@ -273,8 +270,15 @@
                         if (data.user?.role === 'trainer') trainers++;
                         if (data.subscription?.status === 'active') activePlans++;
                     });
+                    
                     const exSnap = await getDocs(collection(db, "exercises"));
-                    AppState.adminData.stats = { athletes, trainers, activePlans, exercises: exSnap.size }; 
+                    let exerciseCount = 0;
+                    exSnap.forEach(doc => {
+                        const ex = doc.data();
+                        if (ex.status === 'approved' || !ex.status) exerciseCount++;
+                    });
+                    
+                    AppState.adminData.stats = { athletes, trainers, activePlans, exercises: exerciseCount }; 
                     this.render();
                 } catch(e) { console.error("Error cargando stats:", e); }
             },
@@ -289,7 +293,6 @@
                 } catch(e) { console.error(e); }
             },
 
-            // --- ACTUALIZADO: Guardamos la capacidad máxima en la suscripción del usuario ---
             async approveUser(userId, planId) {
                 try {
                     let expiresAt = null;
@@ -303,14 +306,14 @@
                             const expDate = new Date();
                             expDate.setDate(expDate.getDate() + durationDays);
                             expiresAt = expDate.toISOString();
-                            maxClients = planData.maxClients || 0; // Capturamos el límite
+                            maxClients = planData.maxClients || 0; 
                         }
                     }
 
                     await updateDoc(doc(db, "users", userId), { 
                         "subscription.status": "active",
                         "subscription.expiresAt": expiresAt,
-                        "subscription.maxClients": maxClients // Se guarda en su perfil
+                        "subscription.maxClients": maxClients 
                     });
                     
                     alert("✅ Usuario aprobado. Fecha de vencimiento y límites configurados.");
@@ -318,17 +321,15 @@
                 } catch(e) { console.error(e); alert("Error al aprobar."); }
             },
 
-            /// --- NUEVO: Lógica del Entrenador ---
+            // --- LÓGICA DE ALUMNOS (ENTRENADOR) ---
             async loadTrainerClients() {
                 try {
                     const q = query(collection(db, "users"), where("user.trainerId", "==", AppState.user.id));
                     const snap = await getDocs(q);
                     const allClients = snap.docs.map(d => ({id: d.id, ...d.data()}));
                     
-                    // Separar activos de pendientes
                     AppState.trainerData.clients = allClients.filter(c => c.subscription?.status === 'active');
                     AppState.trainerData.pendingClients = allClients.filter(c => c.subscription?.status !== 'active');
-                    
                     this.render();
                 } catch(e) { console.error(e); }
             },
@@ -348,10 +349,78 @@
                 this.render();
             },
 
+            // --- NUEVO: FUNCIONES DE ASIGNACIÓN DE RUTINAS POR ENTRENADOR ---
+            openRoutineBuilder() {
+                AppState.trainerData.view = 'create_routine';
+                AppState.routineDraft = { name: '', exercises: [] };
+                // Asegurarnos de tener los ejercicios disponibles
+                this.loadExercises();
+            },
+
+            cancelClientRoutine() {
+                AppState.trainerData.view = 'detail';
+                this.render();
+            },
+
+            async saveClientRoutine(event) {
+                event.preventDefault();
+                const name = document.getElementById('routine-name').value;
+                const client = AppState.trainerData.selectedClient;
+                
+                if (!name || AppState.routineDraft.exercises.length === 0) {
+                    return alert("Ingresa un nombre y al menos un ejercicio.");
+                }
+
+                const exercisesWithDetails = AppState.routineDraft.exercises.map((ex, i) => {
+                    return {
+                        ...ex,
+                        sets: parseInt(document.getElementById(`sets-${i}`).value),
+                        reps: parseInt(document.getElementById(`reps-${i}`).value)
+                    }
+                });
+
+                const newRoutine = {
+                    id: Date.now().toString(),
+                    name: name,
+                    exercises: exercisesWithDetails,
+                    createdAt: new Date().toISOString()
+                };
+
+                // Añadimos a la lista local del cliente y guardamos en Firestore
+                if (!client.routines) client.routines = [];
+                client.routines.push(newRoutine);
+                
+                try {
+                    await updateDoc(doc(db, "users", client.id), { routines: client.routines });
+                    alert(`¡Rutina asignada a ${client.user.name} con éxito! 🔥`);
+                    AppState.trainerData.view = 'detail';
+                    this.render();
+                } catch(e) {
+                    console.error(e);
+                    alert("Error asignando la rutina al alumno.");
+                }
+            },
+
+            async deleteClientRoutine(routineIndex) {
+                if(confirm("¿Estás seguro de eliminar esta rutina del perfil del alumno?")) {
+                    const client = AppState.trainerData.selectedClient;
+                    client.routines.splice(routineIndex, 1);
+                    try {
+                        await updateDoc(doc(db, "users", client.id), { routines: client.routines });
+                        this.render();
+                    } catch(e) { console.error(e); alert("Error al eliminar la rutina."); }
+                }
+            },
+            // --- FIN NUEVO ---
+
             async loadExercises() {
                 try {
                     const snap = await getDocs(collection(db, "exercises"));
-                    AppState.adminData.exercises = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    const allExercises = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    
+                    AppState.adminData.exercises = allExercises.filter(ex => ex.status === 'approved' || !ex.status);
+                    AppState.adminData.pendingExercises = allExercises.filter(ex => ex.status === 'pending');
+                    
                     this.render();
                 } catch(e) { console.error("Error cargando ejercicios:", e); }
             },
@@ -363,6 +432,8 @@
 
             async saveExercise(event) {
                 event.preventDefault();
+                const isAdmin = AppState.user.role === 'admin';
+                
                 const data = {
                     name: document.getElementById('ex-name').value,
                     image: document.getElementById('ex-image').value,
@@ -371,6 +442,9 @@
                     details: document.getElementById('ex-details').value,
                     primaryMuscles: Array.from(document.querySelectorAll('input[name="primaryMuscle"]:checked')).map(el => el.value),
                     secondaryMuscles: Array.from(document.querySelectorAll('input[name="secondaryMuscle"]:checked')).map(el => el.value),
+                    createdBy: AppState.user.id,
+                    creatorName: AppState.user.name,
+                    status: isAdmin ? 'approved' : 'pending', 
                     createdAt: new Date().toISOString()
                 };
 
@@ -378,18 +452,38 @@
 
                 try {
                     await addDoc(collection(db, "exercises"), data);
-                    alert("¡Ejercicio creado con éxito! 🏋️‍♂️");
+                    if (isAdmin) {
+                        alert("¡Ejercicio añadido a la biblioteca con éxito! 🏋️‍♂️");
+                    } else {
+                        alert("¡Gracias! Tu ejercicio ha sido enviado. Un administrador lo revisará pronto para aprobarlo. ⏳");
+                    }
                     this.toggleExerciseForm();
                     this.loadExercises();
                 } catch (error) { console.error(error); alert("Error al guardar el ejercicio."); }
+            },
+
+            async approveExercise(exId) {
+                try {
+                    await updateDoc(doc(db, "exercises", exId), { status: "approved" });
+                    alert("✅ Ejercicio aprobado e incluido en la biblioteca global.");
+                    this.loadExercises();
+                } catch(e) { console.error(e); alert("Error al aprobar."); }
+            },
+
+            async deleteExercise(exId, isRejection = false) {
+                const msg = isRejection ? "¿Estás seguro de rechazar y borrar este ejercicio propuesto?" : "¿Estás seguro de eliminar este ejercicio?";
+                if(confirm(msg)) {
+                    try {
+                        await deleteDoc(doc(db, "exercises", exId));
+                        this.loadExercises();
+                    } catch(e) { console.error(e); }
+                }
             },
 
             async loadTrainers() {
                 try {
                     const q = query(collection(db, "users"), where("user.role", "==", "trainer"));
                     const snap = await getDocs(q);
-                    // Idealmente aquí también podríamos filtrar a los entrenadores que ya están llenos, 
-                    // pero por ahora los mostramos todos.
                     AppState.trainersList = snap.docs.map(d => ({id: d.id, ...d.data()}));
                     this.render();
                 } catch(e) { console.error(e); }
@@ -533,6 +627,7 @@
                     navLinks = [
                         { id: 'dashboard', icon: 'layout-dashboard', label: 'Inicio Entrenador' },
                         { id: 'trainerPanel', icon: 'users', label: 'Mis Alumnos' },
+                        { id: 'exercises', icon: 'dumbbell', label: 'Ejercicios' },
                         { id: 'plans', icon: 'credit-card', label: 'Planes' },
                         { id: 'profile', icon: 'user', label: 'Perfil' }
                     ];
@@ -686,7 +781,6 @@
                     `;
                 },
 
-                // --- ACTUALIZADO: Formulario de planes para incluir LÍMITE DE ALUMNOS ---
                 plans() {
                     if (AppState.user.role === 'admin') {
                         if (AppState.adminData.showPlanForm) {
@@ -800,20 +894,43 @@
                     `}).join('');
 
                     return `
-                        <div class="space-y-6 animate-fade-in">
+                        <div class="space-y-6 animate-fade-in pb-10">
                             <header><h2 class="text-2xl font-bold text-white"><i data-lucide="shield-check" class="text-purple-500 inline mr-2"></i> Gestión de Suscripciones</h2></header>
                             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                                 <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
                                     <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="clock" class="text-amber-500"></i> Pendientes de Aprobación</h3>
-                                    <div class="space-y-2">
+                                    <div class="space-y-2 max-h-96 overflow-y-auto pr-2">
                                         ${AppState.adminData.pendingUsers.length > 0 ? generateUserList(AppState.adminData.pendingUsers, true) : '<p class="text-slate-500 text-center py-4">No hay pagos pendientes.</p>'}
                                     </div>
                                 </div>
                                 <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
                                     <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="check-circle" class="text-emerald-500"></i> Usuarios Activos</h3>
-                                    <div class="space-y-2 h-96 overflow-y-auto pr-2">
+                                    <div class="space-y-2 max-h-96 overflow-y-auto pr-2">
                                         ${AppState.adminData.activeUsers.length > 0 ? generateUserList(AppState.adminData.activeUsers, false) : '<p class="text-slate-500 text-center py-4">No hay usuarios activos aún.</p>'}
                                     </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-8 bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                                <h3 class="text-lg font-bold text-white flex items-center gap-2 mb-6"><i data-lucide="dumbbell" class="text-indigo-500"></i> Ejercicios Propuestos por Entrenadores</h3>
+                                <div class="space-y-4">
+                                    ${AppState.adminData.pendingExercises.length > 0 ? AppState.adminData.pendingExercises.map(ex => `
+                                        <div class="flex items-center justify-between border border-slate-800 p-4 rounded-xl bg-slate-800/50">
+                                            <div class="flex items-center gap-4">
+                                                <div class="w-12 h-12 bg-slate-900 rounded-lg overflow-hidden flex items-center justify-center">
+                                                    ${ex.image ? `<img src="${ex.image}" class="w-full h-full object-cover">` : `<i data-lucide="image" class="text-slate-500"></i>`}
+                                                </div>
+                                                <div>
+                                                    <p class="font-bold text-white">${ex.name}</p>
+                                                    <p class="text-xs text-slate-400">Propuesto por: <span class="text-indigo-400 font-bold">${ex.creatorName || 'Desconocido'}</span></p>
+                                                </div>
+                                            </div>
+                                            <div class="flex gap-2">
+                                                <button onclick="window.App.approveExercise('${ex.id}')" class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-lg transition-colors">Aprobar</button>
+                                                <button onclick="window.App.deleteExercise('${ex.id}', true)" class="px-3 py-2 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg transition-colors">Rechazar</button>
+                                            </div>
+                                        </div>
+                                    `).join('') : '<p class="text-slate-500 text-center">No hay ejercicios pendientes de revisión.</p>'}
                                 </div>
                             </div>
                         </div>
@@ -873,6 +990,7 @@
                                     ${ex.primaryMuscles.map(m => `<span class="text-[10px] px-2 py-1 bg-indigo-500/10 text-indigo-400 rounded-md border border-indigo-500/20 uppercase font-bold">${m}</span>`).join('')}
                                 </div>
                             </div>
+                            ${AppState.user.role === 'admin' ? `<button onclick="window.App.deleteExercise('${ex.id}')" class="text-slate-500 hover:text-red-400 p-2"><i data-lucide="trash-2" class="w-5 h-5"></i></button>` : ''}
                         </div>
                     `).join('');
 
@@ -880,62 +998,172 @@
                         <div class="space-y-6 animate-fade-in pb-10">
                             <header class="flex justify-between items-center mb-8">
                                 <div><h1 class="text-3xl font-black text-white">Biblioteca de Ejercicios</h1><p class="text-slate-400">Total registrados: ${AppState.adminData.exercises.length}</p></div>
-                                <button onclick="window.App.toggleExerciseForm()" class="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/20"><i data-lucide="plus" class="w-5 h-5"></i> Nuevo</button>
+                                <button onclick="window.App.toggleExerciseForm()" class="flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-600/20"><i data-lucide="plus" class="w-5 h-5"></i> ${AppState.user.role === 'admin' ? 'Nuevo Ejercicio' : 'Proponer Ejercicio'}</button>
                             </header>
-                            ${AppState.adminData.exercises.length > 0 ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${exercisesList}</div>` : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="dumbbell" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no hay ejercicios creados.</p></div>`}
+                            ${AppState.adminData.exercises.length > 0 ? `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">${exercisesList}</div>` : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="dumbbell" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no hay ejercicios en la biblioteca.</p></div>`}
                         </div>
                     `;
                 },
 
-                // --- NUEVO: Construcción de la vista del Panel del Entrenador ---
                 trainerPanel() {
-                    const maxClients = AppState.subscription.maxClients || 0; // 0 significa Ilimitado
+                    // VISTA: CREADOR DE RUTINA PARA EL ALUMNO
+                    if (AppState.trainerData.view === 'create_routine' && AppState.trainerData.selectedClient) {
+                        const client = AppState.trainerData.selectedClient;
+                        const exOptions = AppState.adminData.exercises.map(ex => `<option value="${ex.id}">${ex.name}</option>`).join('');
+                        
+                        const selectedExercisesHtml = AppState.routineDraft.exercises.map((ex, index) => `
+                            <div class="bg-slate-800 p-4 rounded-xl flex items-center justify-between border border-slate-700 mb-3 animate-fade-in">
+                                <div class="font-bold text-white flex-1">${ex.name}</div>
+                                <div class="flex items-center gap-4">
+                                    <div><label class="text-xs text-slate-400 block text-center mb-1">Series</label><input type="number" id="sets-${index}" value="${ex.sets}" min="1" class="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-white text-center focus:outline-none focus:border-indigo-500"></div>
+                                    <div><label class="text-xs text-slate-400 block text-center mb-1">Reps</label><input type="number" id="reps-${index}" value="${ex.reps}" min="1" class="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-white text-center focus:outline-none focus:border-indigo-500"></div>
+                                    <button type="button" onclick="window.App.removeExerciseFromRoutine(${index})" class="mt-5 p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                                </div>
+                            </div>
+                        `).join('');
+
+                        return `
+                            <div class="space-y-6 animate-zoom-in max-w-3xl mx-auto pb-10">
+                                <header class="flex justify-between items-center">
+                                    <div>
+                                        <h2 class="text-2xl font-bold text-white">Asignar Rutina a ${client.user.name}</h2>
+                                    </div>
+                                    <button onclick="window.App.cancelClientRoutine()" class="text-slate-400 hover:text-white px-4 py-2 bg-slate-800 rounded-xl">Cancelar</button>
+                                </header>
+                                <form onsubmit="window.App.saveClientRoutine(event)" class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6 shadow-xl">
+                                    <div><label class="text-sm text-slate-400 mb-2 block">Nombre de la Rutina</label><input type="text" id="routine-name" value="${AppState.routineDraft.name}" required placeholder="Ej: Pecho y Tríceps - Día 1" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"></div>
+                                    <div class="border-t border-slate-800 pt-6">
+                                        <h3 class="text-lg font-bold text-white mb-4">Ejercicios de la Rutina</h3>
+                                        <div class="flex flex-col md:flex-row gap-3 mb-6">
+                                            <select id="routine-exercise-select" class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                                <option value="">-- Selecciona un ejercicio de la biblioteca --</option>
+                                                ${exOptions}
+                                            </select>
+                                            <button type="button" onclick="window.App.addExerciseToRoutine()" class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl whitespace-nowrap transition-colors">Añadir Ejercicio</button>
+                                        </div>
+                                        <div id="routine-exercises-list" class="space-y-2">
+                                            ${selectedExercisesHtml || '<div class="text-center p-8 border-2 border-dashed border-slate-800 rounded-xl"><p class="text-slate-500">No has añadido ejercicios aún.</p></div>'}
+                                        </div>
+                                    </div>
+                                    <button type="submit" class="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg shadow-emerald-600/20 transition-colors mt-4">Guardar y Asignar Rutina</button>
+                                </form>
+                            </div>
+                        `;
+                    }
+
+                    // VISTA DE DETALLE DEL ALUMNO
+                    if (AppState.trainerData.view === 'detail' && AppState.trainerData.selectedClient) {
+                        const client = AppState.trainerData.selectedClient;
+                        const clientRoutines = client.routines || [];
+                        
+                        const routinesHtml = clientRoutines.map((r, i) => `
+                            <div class="bg-slate-800 p-4 rounded-xl border border-slate-700 mb-3">
+                                <div class="flex justify-between items-start mb-3">
+                                    <h4 class="font-bold text-white">${r.name}</h4>
+                                    <button onclick="window.App.deleteClientRoutine(${i})" class="text-slate-500 hover:text-red-400"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                                </div>
+                                <div class="space-y-1">
+                                    ${r.exercises.map(ex => `
+                                        <div class="flex justify-between text-xs text-slate-400 border-b border-slate-700/50 pb-1 last:border-0">
+                                            <span>${ex.name}</span>
+                                            <span class="text-indigo-400 font-bold">${ex.sets} x ${ex.reps}</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `).join('');
+
+                        return `
+                            <div class="space-y-6 animate-fade-in pb-10">
+                                <header class="flex items-center gap-4 mb-8">
+                                    <button onclick="window.App.backToClientList()" class="p-2 bg-slate-800 hover:bg-slate-700 rounded-xl text-slate-400 transition-colors">
+                                        <i data-lucide="arrow-left" class="w-6 h-6"></i>
+                                    </button>
+                                    <div>
+                                        <h2 class="text-3xl font-black text-white">Perfil de ${client.user.name}</h2>
+                                        <p class="text-slate-400 mt-1">${client.user.email} | Peso: ${client.profile?.weight || '--'} kg | Altura: ${client.profile?.height || '--'} cm</p>
+                                    </div>
+                                </header>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                    <div class="col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                                        <div class="flex justify-between items-center mb-6">
+                                            <h3 class="text-xl font-bold text-white">Rutinas Asignadas (${clientRoutines.length})</h3>
+                                            <button onclick="window.App.openRoutineBuilder()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-xl transition-colors shadow-lg shadow-indigo-600/20">
+                                                <i data-lucide="plus" class="inline w-4 h-4 mr-1"></i> Asignar Nueva
+                                            </button>
+                                        </div>
+                                        ${clientRoutines.length > 0 
+                                            ? `<div class="space-y-3">${routinesHtml}</div>` 
+                                            : `<div class="text-center py-10 border-2 border-dashed border-slate-700 rounded-xl"><p class="text-slate-500">Este alumno no tiene rutinas asignadas.</p></div>`
+                                        }
+                                    </div>
+                                    <div class="space-y-6">
+                                        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-center">
+                                            <i data-lucide="activity" class="w-12 h-12 text-emerald-500 mx-auto mb-3"></i>
+                                            <h4 class="font-bold text-white text-lg">Progreso</h4>
+                                            <p class="text-slate-400 text-sm mt-2">Módulo en construcción.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // VISTA DE LISTA (DASHBOARD DEL ENTRENADOR)
+                    const maxClients = AppState.subscription.maxClients || 0;
                     const currentClients = AppState.trainerData.clients.length;
+                    const pendingCount = AppState.trainerData.pendingClients.length;
                     const limitText = maxClients === 0 ? 'Ilimitado' : maxClients;
                     const isFull = maxClients > 0 && currentClients >= maxClients;
 
                     const clientsList = AppState.trainerData.clients.map(c => `
-                        <div class="bg-slate-800 p-4 rounded-xl flex justify-between items-center border border-slate-700 hover:border-indigo-500/50 transition-colors">
+                        <div class="bg-slate-800 p-4 rounded-xl flex justify-between items-center border border-slate-700 hover:border-indigo-500/50 transition-colors group cursor-pointer" onclick="window.App.viewClientDetail('${c.id}')">
                             <div class="flex items-center gap-4">
-                                <div class="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center border border-slate-700">
+                                <div class="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center border border-slate-700 group-hover:border-indigo-500 transition-colors">
                                     <i data-lucide="user" class="text-indigo-400 w-6 h-6"></i>
                                 </div>
                                 <div>
-                                    <p class="font-bold text-white text-lg">${c.user.name}</p>
-                                    <p class="text-xs text-slate-400">${c.user.email}</p>
+                                    <p class="font-bold text-white text-lg group-hover:text-indigo-400 transition-colors">${c.user.name}</p>
+                                    <p class="text-xs text-slate-400">${c.routines?.length || 0} Rutinas Asignadas</p>
                                 </div>
                             </div>
-                            <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold transition-colors">
-                                Ver Rutinas
-                            </button>
+                            <div class="p-2 bg-slate-900 rounded-lg text-slate-400 group-hover:text-white transition-colors">
+                                <i data-lucide="chevron-right" class="w-5 h-5"></i>
+                            </div>
                         </div>
                     `).join('');
 
                     return `
                         <div class="space-y-6 animate-fade-in pb-10">
-                            <header class="flex flex-col sm:flex-row sm:justify-between sm:items-end mb-8 gap-4">
-                                <div>
-                                    <h2 class="text-3xl font-black text-white">Mis Alumnos</h2>
-                                    <p class="text-slate-400 mt-1">Gestiona a tus clientes activos</p>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center justify-between">
+                                    <div><p class="text-slate-400 text-sm font-medium">Alumnos Activos</p><p class="text-3xl font-black text-white mt-1">${currentClients} <span class="text-lg text-slate-500 font-normal">/ ${limitText}</span></p></div>
+                                    <div class="p-4 bg-indigo-500/10 text-indigo-500 rounded-xl"><i data-lucide="users" class="w-8 h-8"></i></div>
                                 </div>
-                                <div class="bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 text-center sm:text-right flex items-center gap-4">
-                                    <span class="text-sm text-slate-400 font-medium">Capacidad:</span>
-                                    <span class="px-3 py-1 ${isFull ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'} rounded-lg border font-black text-lg">
-                                        ${currentClients} / ${limitText}
-                                    </span>
+                                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center justify-between">
+                                    <div><p class="text-slate-400 text-sm font-medium">Pendientes de Pago</p><p class="text-3xl font-black text-white mt-1">${pendingCount}</p></div>
+                                    <div class="p-4 bg-amber-500/10 text-amber-500 rounded-xl"><i data-lucide="clock" class="w-8 h-8"></i></div>
                                 </div>
+                                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center justify-between">
+                                    <div><p class="text-slate-400 text-sm font-medium">Estado del Plan</p><p class="text-xl font-bold ${isFull ? 'text-red-400' : 'text-emerald-400'} mt-2">${isFull ? 'Lleno' : 'Con Capacidad'}</p></div>
+                                    <div class="p-4 ${isFull ? 'bg-red-500/10 text-red-500' : 'bg-emerald-500/10 text-emerald-500'} rounded-xl"><i data-lucide="activity" class="w-8 h-8"></i></div>
+                                </div>
+                            </div>
+
+                            <header class="flex flex-col sm:flex-row sm:justify-between sm:items-end mb-6 gap-4">
+                                <div><h2 class="text-2xl font-bold text-white">Directorio de Alumnos</h2></div>
                             </header>
 
                             ${isFull ? `
                                 <div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-400 text-sm font-bold mb-6 flex items-center gap-3">
                                     <i data-lucide="alert-triangle" class="w-6 h-6 flex-shrink-0"></i> 
-                                    Has alcanzado el límite de tu plan actual. Los nuevos usuarios no podrán seleccionarte hasta que mejores tu suscripción.
+                                    Has alcanzado el límite de tu plan. No aparecerás en la lista para nuevos atletas.
                                 </div>
                             ` : ''}
 
                             ${AppState.trainerData.clients.length > 0 
                                 ? `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${clientsList}</div>` 
-                                : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="users" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no tienes alumnos asignados.</p></div>`
+                                : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="users" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no tienes alumnos activos.</p></div>`
                             }
                         </div>
                     `;
