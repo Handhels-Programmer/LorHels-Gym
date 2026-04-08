@@ -62,7 +62,7 @@
         const AppState = {
             isAuthenticated: false, authMode: 'login', currentView: 'dashboard',
             user: { id: '', name: '', role: 'user', email: '', trainerId: null },
-            subscription: { plan: null, status: 'inactive', expiresAt: null },
+            subscription: { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 }, // maxClients añadido
             profile: { weight: 0, height: 0 },
             routines: [], 
             workoutHistory: [],
@@ -78,7 +78,14 @@
                 plans: [], 
                 showPlanForm: false 
             },
-            trainersList: []
+            trainersList: [],
+            trainerData: { 
+                clients: [],
+                pendingClients: [], // Alumnos que han seleccionado al entrenador pero no están activos
+                stats: { totalRoutines: 0, completedRoutines: 0 },
+                selectedClient: null, // Para ver el detalle de un alumno
+                view: 'list' // 'list' o 'detail'
+            }
         };
 
         const FirebaseDB = {
@@ -134,11 +141,12 @@
 
             resetState() {
                 AppState.user = { id: '', name: '', role: 'user', email: '', trainerId: null };
-                AppState.subscription = { plan: null, status: 'inactive', expiresAt: null };
+                AppState.subscription = { plan: null, status: 'inactive', expiresAt: null, maxClients: 0 };
                 AppState.profile = { weight: 0, height: 0 };
                 AppState.routines = []; AppState.workoutHistory = [];
                 AppState.routineDraft = { name: '', exercises: [] };
                 AppState.plans = [];
+                AppState.trainerData = { clients: [] };
             },
 
             toggleAuthMode() { AppState.authMode = AppState.authMode === 'login' ? 'register' : 'login'; this.render(); },
@@ -171,6 +179,10 @@
                 if (view === 'plans') {
                     if (AppState.user.role === 'admin') this.loadPlansAdmin();
                     else this.loadUserPlans();
+                }
+                if (view === 'trainerPanel' && AppState.user.role === 'trainer') {
+                    AppState.trainerData.view = 'list'; // Reiniciar a la lista
+                    this.loadTrainerClients();
                 }
                 this.render();
             },
@@ -221,14 +233,15 @@
                 this.render();
             },
 
-            // --- ACTUALIZADO: Guardar Plan con Duración ---
+            // --- ACTUALIZADO: Guardar Plan con Límite de Alumnos ---
             async savePlan(event) {
                 event.preventDefault();
                 const data = {
                     name: document.getElementById('plan-name').value,
                     price: document.getElementById('plan-price').value,
                     desc: document.getElementById('plan-desc').value,
-                    durationDays: parseInt(document.getElementById('plan-duration').value), // NUEVO: Días
+                    durationDays: parseInt(document.getElementById('plan-duration').value),
+                    maxClients: parseInt(document.getElementById('plan-max-clients').value || 0), // NUEVO: Max clientes
                     targetRole: document.getElementById('plan-role').value,
                     createdAt: new Date().toISOString()
                 };
@@ -276,30 +289,63 @@
                 } catch(e) { console.error(e); }
             },
 
-            // --- ACTUALIZADO: Aprobar Usuario con Vencimiento ---
+            // --- ACTUALIZADO: Guardamos la capacidad máxima en la suscripción del usuario ---
             async approveUser(userId, planId) {
                 try {
                     let expiresAt = null;
+                    let maxClients = 0;
                     
-                    // Si tenemos un planId, buscamos sus días de duración para calcular la fecha
                     if (planId) {
                         const planSnap = await getDoc(doc(db, "plans", planId));
                         if (planSnap.exists()) {
-                            const durationDays = planSnap.data().durationDays || 30; // Por defecto 30 días
+                            const planData = planSnap.data();
+                            const durationDays = planData.durationDays || 30;
                             const expDate = new Date();
                             expDate.setDate(expDate.getDate() + durationDays);
                             expiresAt = expDate.toISOString();
+                            maxClients = planData.maxClients || 0; // Capturamos el límite
                         }
                     }
 
                     await updateDoc(doc(db, "users", userId), { 
                         "subscription.status": "active",
-                        "subscription.expiresAt": expiresAt
+                        "subscription.expiresAt": expiresAt,
+                        "subscription.maxClients": maxClients // Se guarda en su perfil
                     });
                     
-                    alert("✅ Usuario aprobado. Fecha de vencimiento configurada.");
+                    alert("✅ Usuario aprobado. Fecha de vencimiento y límites configurados.");
                     this.loadUsersAdmin(); 
                 } catch(e) { console.error(e); alert("Error al aprobar."); }
+            },
+
+            /// --- NUEVO: Lógica del Entrenador ---
+            async loadTrainerClients() {
+                try {
+                    const q = query(collection(db, "users"), where("user.trainerId", "==", AppState.user.id));
+                    const snap = await getDocs(q);
+                    const allClients = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                    
+                    // Separar activos de pendientes
+                    AppState.trainerData.clients = allClients.filter(c => c.subscription?.status === 'active');
+                    AppState.trainerData.pendingClients = allClients.filter(c => c.subscription?.status !== 'active');
+                    
+                    this.render();
+                } catch(e) { console.error(e); }
+            },
+
+            viewClientDetail(clientId) {
+                const client = AppState.trainerData.clients.find(c => c.id === clientId);
+                if (client) {
+                    AppState.trainerData.selectedClient = client;
+                    AppState.trainerData.view = 'detail';
+                    this.render();
+                }
+            },
+
+            backToClientList() {
+                AppState.trainerData.selectedClient = null;
+                AppState.trainerData.view = 'list';
+                this.render();
             },
 
             async loadExercises() {
@@ -342,6 +388,8 @@
                 try {
                     const q = query(collection(db, "users"), where("user.role", "==", "trainer"));
                     const snap = await getDocs(q);
+                    // Idealmente aquí también podríamos filtrar a los entrenadores que ya están llenos, 
+                    // pero por ahora los mostramos todos.
                     AppState.trainersList = snap.docs.map(d => ({id: d.id, ...d.data()}));
                     this.render();
                 } catch(e) { console.error(e); }
@@ -638,7 +686,7 @@
                     `;
                 },
 
-                // --- ACTUALIZADO: Formulario de Planes para pedir los días ---
+                // --- ACTUALIZADO: Formulario de planes para incluir LÍMITE DE ALUMNOS ---
                 plans() {
                     if (AppState.user.role === 'admin') {
                         if (AppState.adminData.showPlanForm) {
@@ -653,17 +701,15 @@
                                             <label class="text-sm text-slate-400 mb-1 block">Nombre del Plan</label>
                                             <input type="text" id="plan-name" required placeholder="Ej: Plan Mensual Elite" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
                                         </div>
-                                        <div>
-                                            <label class="text-sm text-slate-400 mb-1 block">Precio (Incluye moneda)</label>
-                                            <input type="text" id="plan-price" required placeholder="Ej: RD$ 1,500" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
-                                        </div>
-                                        <div>
-                                            <label class="text-sm text-slate-400 mb-1 block">Duración (en Días)</label>
-                                            <input type="number" id="plan-duration" required placeholder="Ej: 30" min="1" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
-                                        </div>
-                                        <div>
-                                            <label class="text-sm text-slate-400 mb-1 block">Descripción / Beneficios</label>
-                                            <textarea id="plan-desc" rows="2" required placeholder="Ej: Acceso a rutinas por 30 días" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"></textarea>
+                                        <div class="grid grid-cols-2 gap-4">
+                                            <div>
+                                                <label class="text-sm text-slate-400 mb-1 block">Precio</label>
+                                                <input type="text" id="plan-price" required placeholder="Ej: RD$ 1,500" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                            </div>
+                                            <div>
+                                                <label class="text-sm text-slate-400 mb-1 block">Duración (Días)</label>
+                                                <input type="number" id="plan-duration" required placeholder="Ej: 30" min="1" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                            </div>
                                         </div>
                                         <div>
                                             <label class="text-sm text-slate-400 mb-1 block">Dirigido a</label>
@@ -671,6 +717,15 @@
                                                 <option value="user">Atletas (Usuarios normales)</option>
                                                 <option value="trainer">Entrenadores Profesionales</option>
                                             </select>
+                                        </div>
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Límite de Alumnos (Solo para Entrenadores)</label>
+                                            <input type="number" id="plan-max-clients" placeholder="0 = Ilimitado" min="0" value="0" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500">
+                                            <p class="text-xs text-slate-500 mt-1">Deja en 0 si es un plan ilimitado o si es un plan para atletas.</p>
+                                        </div>
+                                        <div>
+                                            <label class="text-sm text-slate-400 mb-1 block">Descripción / Beneficios</label>
+                                            <textarea id="plan-desc" rows="2" required placeholder="Ej: Acceso a rutinas por 30 días" class="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500"></textarea>
                                         </div>
                                         <button type="submit" class="w-full py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg mt-4">Guardar Plan</button>
                                     </form>
@@ -683,6 +738,7 @@
                                 <div>
                                     <h3 class="font-bold text-white text-lg">${p.name} <span class="text-[10px] px-2 py-1 ml-2 ${p.targetRole === 'trainer' ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'} rounded-md border uppercase">${p.targetRole}</span></h3>
                                     <p class="text-indigo-400 font-bold mt-1">${p.price} <span class="text-slate-500 text-sm font-normal">(${p.durationDays || 30} días)</span></p>
+                                    ${p.targetRole === 'trainer' ? `<p class="text-amber-400 text-xs font-bold mt-1">Límite: ${p.maxClients > 0 ? p.maxClients + ' alumnos' : 'Ilimitado'}</p>` : ''}
                                     <p class="text-slate-400 text-sm mt-1">${p.desc}</p>
                                 </div>
                                 <button onclick="window.App.deletePlan('${p.id}')" class="text-slate-500 hover:text-red-400 p-3 hover:bg-red-500/10 rounded-xl transition-colors"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
@@ -706,6 +762,7 @@
                                 <h3 class="text-xl font-black text-white">${plan.name}</h3>
                                 <p class="text-3xl font-bold text-indigo-400 mt-2">${plan.price}</p>
                                 <p class="text-slate-500 text-sm mt-1">Duración: ${plan.durationDays || 30} días</p>
+                                ${AppState.user.role === 'trainer' ? `<p class="text-amber-400 text-xs font-bold mt-1 mb-2">Permite: ${plan.maxClients > 0 ? plan.maxClients + ' Alumnos' : 'Alumnos Ilimitados'}</p>` : ''}
                                 <p class="text-slate-400 mt-4 text-sm leading-relaxed">${plan.desc}</p>
                             </div>
                             <button onclick="window.App.requestSubscription('${plan.id}', '${plan.name}')" class="mt-8 w-full px-4 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center justify-center gap-2"><i data-lucide="message-circle" class="w-5 h-5"></i> Enviar Comprobante</button>
@@ -720,7 +777,6 @@
                     `;
                 },
 
-                // --- ACTUALIZADO: Panel de Aprobaciones pasa el ID del plan ---
                 adminPanel() {
                     const generateUserList = (users, isPending) => users.map(u => {
                         const expText = u.subscription?.expiresAt ? new Date(u.subscription.expiresAt).toLocaleDateString() : 'Sin fecha';
@@ -737,7 +793,6 @@
                                 </div>
                             </div>
                             ${isPending 
-                                // Pasamos el ID del usuario y el ID del plan que solicitó
                                 ? `<button onclick="window.App.approveUser('${u.id}', '${u.subscription?.plan}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-bold rounded-lg transition-colors">Aprobar</button>`
                                 : `<span class="px-3 py-1 bg-emerald-500/10 text-emerald-500 text-xs font-bold rounded-lg border border-emerald-500/20">Activo</span>`
                             }
@@ -832,8 +887,58 @@
                     `;
                 },
 
+                // --- NUEVO: Construcción de la vista del Panel del Entrenador ---
                 trainerPanel() {
-                    return `<div class="space-y-6 animate-fade-in"><header><h2 class="text-2xl font-bold text-white">Mis Alumnos</h2></header><div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 text-center py-12"><p class="text-slate-400">Módulo en construcción: Aquí verás a los usuarios que te seleccionaron.</p></div></div>`;
+                    const maxClients = AppState.subscription.maxClients || 0; // 0 significa Ilimitado
+                    const currentClients = AppState.trainerData.clients.length;
+                    const limitText = maxClients === 0 ? 'Ilimitado' : maxClients;
+                    const isFull = maxClients > 0 && currentClients >= maxClients;
+
+                    const clientsList = AppState.trainerData.clients.map(c => `
+                        <div class="bg-slate-800 p-4 rounded-xl flex justify-between items-center border border-slate-700 hover:border-indigo-500/50 transition-colors">
+                            <div class="flex items-center gap-4">
+                                <div class="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center border border-slate-700">
+                                    <i data-lucide="user" class="text-indigo-400 w-6 h-6"></i>
+                                </div>
+                                <div>
+                                    <p class="font-bold text-white text-lg">${c.user.name}</p>
+                                    <p class="text-xs text-slate-400">${c.user.email}</p>
+                                </div>
+                            </div>
+                            <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-bold transition-colors">
+                                Ver Rutinas
+                            </button>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="space-y-6 animate-fade-in pb-10">
+                            <header class="flex flex-col sm:flex-row sm:justify-between sm:items-end mb-8 gap-4">
+                                <div>
+                                    <h2 class="text-3xl font-black text-white">Mis Alumnos</h2>
+                                    <p class="text-slate-400 mt-1">Gestiona a tus clientes activos</p>
+                                </div>
+                                <div class="bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 text-center sm:text-right flex items-center gap-4">
+                                    <span class="text-sm text-slate-400 font-medium">Capacidad:</span>
+                                    <span class="px-3 py-1 ${isFull ? 'bg-red-500/10 text-red-400 border-red-500/20' : 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20'} rounded-lg border font-black text-lg">
+                                        ${currentClients} / ${limitText}
+                                    </span>
+                                </div>
+                            </header>
+
+                            ${isFull ? `
+                                <div class="p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-400 text-sm font-bold mb-6 flex items-center gap-3">
+                                    <i data-lucide="alert-triangle" class="w-6 h-6 flex-shrink-0"></i> 
+                                    Has alcanzado el límite de tu plan actual. Los nuevos usuarios no podrán seleccionarte hasta que mejores tu suscripción.
+                                </div>
+                            ` : ''}
+
+                            ${AppState.trainerData.clients.length > 0 
+                                ? `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4">${clientsList}</div>` 
+                                : `<div class="text-center py-20 bg-slate-900 border border-slate-800 rounded-2xl"><i data-lucide="users" class="w-16 h-16 text-slate-700 mx-auto mb-4"></i><p class="text-slate-400 text-lg">Aún no tienes alumnos asignados.</p></div>`
+                            }
+                        </div>
+                    `;
                 },
 
                 profile() { 
